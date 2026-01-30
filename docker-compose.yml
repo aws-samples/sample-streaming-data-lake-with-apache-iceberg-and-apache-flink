@@ -1,0 +1,22 @@
+services:
+  # PostgreSQL for Iceberg JDBC lock factory
+  # Used by maintenance tasks to coordinate distributed locking
+  postgres:
+    image: postgres:15-alpine
+    container_name: iceberg-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: iceberg_locks
+      POSTGRES_USER: flink
+      POSTGRES_PASSWORD: flinkpw
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flink -d iceberg_locks"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:

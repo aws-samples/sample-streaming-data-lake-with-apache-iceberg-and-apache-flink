@@ -1,0 +1,47 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Kiro
+.kiro/
+
+# IntelliJ Run Configurations
+.run/
+
+# Blog post (internal draft)
+BLOG_POST.md
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# CDK
+cdk-infrastructure/cdk.out/
+cdk-infrastructure/node_modules/
+cdk-infrastructure/*.js
+cdk-infrastructure/*.d.ts
+!cdk-infrastructure/jest.config.js
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# jqwik database
+.jqwik-database
+
+# Local dev properties (keep template, ignore actual)
+*-dev.json
+
+# Backup files
+*.bak*
