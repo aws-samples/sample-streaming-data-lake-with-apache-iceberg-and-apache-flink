@@ -21,34 +21,49 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 │    (Local)      │      │   (2 shards)     │      │   (2-4 KPUs)        │
 └─────────────────┘      └──────────────────┘      └──────────┬──────────┘
                                                                │
-                         ┌─────────────────────────────────────┼─────────────┐
-                         │                                     ▼             │
-                         │  ┌──────────────────┐    ┌──────────────────┐   │
-                         │  │  S3 Warehouse    │◀───│  Iceberg Tables  │   │
-                         │  │  (Versioned)     │    │  (Glue Catalog)  │   │
-                         │  └──────────────────┘    └──────────────────┘   │
-                         │                                                  │
-                         │  ┌──────────────────┐    ┌──────────────────┐   │
-                         │  │  RDS PostgreSQL  │◀───│  Maintenance     │   │
-                         │  │  (JDBC Locks)    │    │  Coordinator     │   │
-                         │  └──────────────────┘    └──────────────────┘   │
-                         │         (Optional - DataStream with maintenance) │
-                         └──────────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────────┼──────────────────┐
+                    │                                          ▼                  │
+                    │  Option A: Glue Catalog                                     │
+                    │  ┌──────────────────┐    ┌──────────────────┐              │
+                    │  │  S3 Warehouse    │◀───│  Iceberg Tables  │              │
+                    │  │  (Versioned)     │    │  (Glue Catalog)  │              │
+                    │  └──────────────────┘    └──────────────────┘              │
+                    │                                                             │
+                    │  Option B: S3 Tables (Native Iceberg)                       │
+                    │  ┌──────────────────────────────────────────┐              │
+                    │  │  S3 Table Bucket (Auto-maintained)       │              │
+                    │  │  - Automatic compaction                  │              │
+                    │  │  - Automatic snapshot management         │              │
+                    │  └──────────────────────────────────────────┘              │
+                    │                                                             │
+                    │  ┌──────────────────┐    ┌──────────────────┐              │
+                    │  │  RDS PostgreSQL  │◀───│  Maintenance     │              │
+                    │  │  (JDBC Locks)    │    │  Coordinator     │              │
+                    │  └──────────────────┘    └──────────────────┘              │
+                    │         (Optional - DataStream with Glue + maintenance)     │
+                    └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Infrastructure Components
 
-**Core Resources (All Deployments):**
+**Core Resources (Glue Catalog - Default):**
 - Amazon Kinesis Data Stream (2 shards, 24h retention)
 - Amazon S3 bucket (versioned, encrypted)
 - AWS Glue database for Iceberg catalog
 - AWS Managed Flink application (Flink 1.20)
 - CloudWatch Log Groups for monitoring
 
-**Additional Resources (DataStream with Maintenance):**
+**Core Resources (S3 Tables Catalog):**
+- Amazon Kinesis Data Stream (2 shards, 24h retention)
+- S3 Table Bucket (native Iceberg storage with automatic maintenance)
+- S3 Tables namespace
+- AWS Managed Flink application (Flink 1.20)
+- CloudWatch Log Groups for monitoring
+- Custom resource Lambda for namespace cleanup on stack deletion
+
+**Additional Resources (DataStream with Glue + Maintenance):**
 - Amazon VPC (2 AZs, public/private subnets, NAT Gateway)
 - Amazon RDS PostgreSQL (t3.micro, for distributed locking)
-- VPC Endpoints (DynamoDB Gateway, Bedrock Runtime Interface)
 - Security Groups for Flink and RDS
 
 ## Applications
@@ -86,16 +101,18 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 ### 3. Dynamic Sink (`dynamic-sink-sample`)
 **Best for: Multi-tenant or dynamic schema scenarios**
 
-- Automatic table routing based on event metadata
-- Dynamic table creation with schema inference
-- Schema evolution support
-- Generic event handling with flexible routing
+- Schema-agnostic event processing with automatic schema inference
+- Automatic table routing based on event metadata (e.g., `event_type` field)
+- Dynamic table creation with schema inferred from JSON structure
+- Schema evolution support as new fields appear
+- Routes to tables named `{event_type}_events` (e.g., `order_events`, `user_events`)
 
 **Key Features:**
 - Zero-configuration table creation
-- Automatic schema detection
+- Automatic schema detection from JSON
 - Event-driven table routing
-- Extensible for custom routing logic
+- Handles ANY JSON structure without code changes
+- Configurable routing field and table naming
 
 ## Prerequisites
 ### For Local Development
@@ -127,11 +144,6 @@ Your AWS credentials need permissions for:
 
 ### 1. Clone and Build
 ```bash
-docker-compose up -d
-```
-
-### 1. Clone and Build
-```bash
 git clone <repository-url>
 cd iceberg-flink-samples
 mvn clean package -DskipTests
@@ -158,17 +170,11 @@ Edit `src/main/resources/flink-application-properties-dev.json` in your chosen s
 
 ### 4. Run a Flink Application
 Open in IntelliJ and select a run configuration:
-- `DataStreamIcebergJob` - DataStream API
-- `FlinkSqlIcebergJob` - SQL API  
-- `DynamicSinkJob` - Dynamic routing
-
-Configuration is in `src/main/resources/flink-application-properties-dev.json` for each app.
-
-### 4. Run a Flink Application
-Open in IntelliJ and select a run configuration:
 - `DataStreamIcebergJob` - DataStream API with maintenance
 - `FlinkSqlIcebergJob` - SQL API with multi-table routing
 - `DynamicSinkJob` - Dynamic routing with schema evolution
+
+Configuration is in `src/main/resources/flink-application-properties-dev.json` for each app.
 
 Or run from command line:
 ```bash
@@ -180,12 +186,6 @@ java -jar flink-sql-sample/target/flink-sql-sample-1.0-SNAPSHOT.jar
 
 # Dynamic Sink
 java -jar dynamic-sink-sample/target/dynamic-sink-sample-1.0-SNAPSHOT.jar
-```
-
-### 5. Generate Test Data
-```bash
-# Update data-generator run config with your Kinesis stream ARN
-# Then run DataGenerator from IntelliJ
 ```
 
 ### 5. Generate Test Data
@@ -229,7 +229,6 @@ java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar iceberg-events-d
 - 5% late-arriving events (for watermark testing)
 - Schema evolution based on version parameter
 
-### 6. Access Flink UI
 ### 6. Access Flink UI
 - DataStream: http://localhost:8081
 - SQL: http://localhost:8082
@@ -531,19 +530,6 @@ When `enable.maintenance=true`, the application runs coordinated maintenance:
 ## Project Structure
 
 ```
-.
-├── datastream-sample/          # DataStream API with maintenance
-├── flink-sql-sample/           # SQL API with multi-table routing
-├── dynamic-sink-sample/        # Dynamic Iceberg Sink
-├── data-generator/             # Test data generator (local only)
-├── shared-common/              # Shared models and utilities
-├── cdk-infrastructure/         # AWS CDK for deployment
-└── docker-compose.yml          # PostgreSQL for local development
-```
-
-## Project Structure
-
-```
 iceberg-flink-samples/
 ├── datastream-sample/              # DataStream API with IcebergSink
 │   ├── src/main/java/             # Application code
@@ -553,7 +539,7 @@ iceberg-flink-samples/
 │   ├── src/main/java/             # SQL application code
 │   ├── src/test/java/             # Upsert semantics tests
 │   └── sql/                       # DDL statements
-├── dynamic-sink-sample/           # Dynamic Iceberg Sink
+├── dynamic-sink-sample/           # Dynamic Iceberg Sink (Schema-Agnostic)
 │   └── src/main/java/             # Dynamic routing logic
 ├── data-generator/                # Test data generator
 │   └── src/main/java/             # Event generation
