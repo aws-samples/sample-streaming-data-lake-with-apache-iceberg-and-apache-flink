@@ -95,6 +95,12 @@
             <artifactId>iceberg-aws-bundle</artifactId>
         </dependency>
         
+        <!-- S3 Tables Catalog for Iceberg -->
+        <dependency>
+            <groupId>software.amazon.s3tables</groupId>
+            <artifactId>s3-tables-catalog-for-iceberg</artifactId>
+        </dependency>
+        
         <!-- S3 FileSystem Support -->
         <dependency>
             <groupId>org.apache.flink</groupId>

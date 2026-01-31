@@ -13,12 +13,12 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * Flink SQL sample demonstrating Iceberg table writes with Glue Catalog.
+ * Flink SQL sample demonstrating Iceberg table writes with Glue Catalog or S3 Tables.
  * 
  * This job demonstrates:
- * - Creating an Iceberg catalog using SQL DDL with Glue Catalog
+ * - Creating an Iceberg catalog using SQL DDL with Glue Catalog or S3 Tables
  * - Reading from Kinesis Data Stream using SQL
- * - Writing to Iceberg tables with v3 format and delete vectors
+ * - Writing to Iceberg tables with v2 format
  * - UPSERT operations using primary keys
  * - Embedded compaction via SQL hints
  * 
@@ -27,6 +27,8 @@ import java.util.Properties;
  * - AWS_REGION: AWS region for Kinesis and Glue (default: us-east-1)
  * - S3_WAREHOUSE_PATH: S3 path for Iceberg warehouse (default: s3://iceberg-warehouse-{account}/warehouse)
  * - GLUE_DATABASE: Glue database name (default: iceberg_samples)
+ * - CATALOG_TYPE: Catalog type - 'glue' or 's3tables' (default: glue)
+ * - S3TABLES_BUCKET_ARN: S3 Table Bucket ARN (required when CATALOG_TYPE=s3tables)
  * - ENABLE_MAINTENANCE: Enable maintenance (default: false)
  * - RDS_JDBC_URL: PostgreSQL JDBC URL for locks (default: jdbc:postgresql://localhost:5432/iceberg_locks)
  */
@@ -95,13 +97,25 @@ public class FlinkSqlIcebergJob {
         String s3WarehousePath = props.getProperty("s3.warehouse.path", "s3://iceberg-warehouse/warehouse");
         String glueDatabase = props.getProperty("glue.database", "iceberg_samples");
         String tablePrefix = props.getProperty("table.prefix", "sql_");
+        String catalogType = props.getProperty("iceberg.catalog.type", "glue");
+        String s3TableBucketArn = props.getProperty("s3tables.bucket.arn", "");
         boolean enableMaintenance = Boolean.parseBoolean(props.getProperty("enable.maintenance", "false"));
         
         LOG.info("Starting Flink SQL Iceberg Job");
         LOG.info("Kinesis Stream: {}", kinesisStreamName);
         LOG.info("AWS Region: {}", awsRegion);
-        LOG.info("S3 Warehouse: {}", s3WarehousePath);
-        LOG.info("Glue Database: {}", glueDatabase);
+        LOG.info("Catalog Type: {}", catalogType);
+        if ("s3tables".equals(catalogType)) {
+            LOG.info("S3 Table Bucket ARN: {}", s3TableBucketArn);
+        } else {
+            LOG.info("S3 Warehouse: {}", s3WarehousePath);
+        }
+        LOG.info("Database: {}", glueDatabase);
+        
+        if ("s3tables".equals(catalogType) && enableMaintenance) {
+            LOG.warn("S3 Tables handles maintenance automatically - ignoring enable.maintenance setting");
+            enableMaintenance = false;
+        }
         
         if (enableMaintenance) {
             LOG.warn("Note: SQL API has limited maintenance support compared to DataStream API");
@@ -129,34 +143,57 @@ public class FlinkSqlIcebergJob {
         
         LOG.info("Table environment created");
         
-        // Create Iceberg catalog using SQL DDL with Glue Catalog
-        String createCatalogSql = "CREATE CATALOG glue_catalog WITH (\n" +
-            "    'type' = 'iceberg',\n" +
-            "    'catalog-impl' = 'org.apache.iceberg.aws.glue.GlueCatalog',\n" +
-            "    'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',\n" +
-            "    'warehouse' = '" + s3WarehousePath + "',\n" +
-            "    'glue.skip-archive' = 'true',\n" +
-            "    'glue.skip-name-validation' = 'true'\n" +
-            ")";
+        // Create Iceberg catalog using SQL DDL - supports Glue Catalog or S3 Tables
+        String catalogName;
+        String createCatalogSql;
         
-        LOG.info("Creating Iceberg catalog with Glue");
+        if ("s3tables".equals(catalogType)) {
+            // S3 Tables Catalog
+            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
+                throw new IllegalArgumentException("S3 Table Bucket ARN is required when using S3 Tables catalog");
+            }
+            
+            catalogName = "s3tables_catalog";
+            createCatalogSql = "CREATE CATALOG " + catalogName + " WITH (\n" +
+                "    'type' = 'iceberg',\n" +
+                "    'catalog-impl' = 'software.amazon.s3tables.iceberg.S3TablesCatalog',\n" +
+                "    'warehouse' = '" + s3TableBucketArn + "',\n" +
+                "    'client.region' = '" + awsRegion + "'\n" +
+                ")";
+            
+            LOG.info("Creating Iceberg catalog with S3 Tables");
+        } else {
+            // Glue Catalog (default)
+            catalogName = "glue_catalog";
+            createCatalogSql = "CREATE CATALOG " + catalogName + " WITH (\n" +
+                "    'type' = 'iceberg',\n" +
+                "    'catalog-impl' = 'org.apache.iceberg.aws.glue.GlueCatalog',\n" +
+                "    'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',\n" +
+                "    'warehouse' = '" + s3WarehousePath + "',\n" +
+                "    'glue.skip-archive' = 'true',\n" +
+                "    'glue.skip-name-validation' = 'true'\n" +
+                ")";
+            
+            LOG.info("Creating Iceberg catalog with Glue");
+        }
+        
         tableEnv.executeSql(createCatalogSql);
-        LOG.info("Iceberg catalog 'glue_catalog' created successfully");
+        LOG.info("Iceberg catalog '{}' created successfully", catalogName);
         
         // Create Kinesis source table in DEFAULT catalog (before switching to glue_catalog)
         // Kinesis tables cannot be created in Iceberg/Glue catalog
         LOG.info("Creating Kinesis source table in default catalog");
         String createKinesisSourceSql = "CREATE TABLE kinesis_source (\n" +
             "    event_id STRING,\n" +
-            "    event_time TIMESTAMP(3),\n" +
+            "    event_time STRING,\n" +  // Read as STRING, parse later
             "    event_type STRING,\n" +
             "    region STRING,\n" +
-            "    event_date DATE,\n" +
+            "    event_date STRING,\n" +  // Read as STRING, parse later
             "    metadata MAP<STRING, STRING>,\n" +
             "    -- Order event fields\n" +
             "    order_id STRING,\n" +
             "    customer_id STRING,\n" +
-            "    amount DECIMAL(18, 2),\n" +
+            "    amount DOUBLE,\n" +  // Use DOUBLE instead of DECIMAL for JSON compatibility
             "    currency STRING,\n" +
             "    status STRING,\n" +
             "    -- User event fields\n" +
@@ -184,13 +221,13 @@ public class FlinkSqlIcebergJob {
         tableEnv.executeSql(createKinesisSourceSql);
         LOG.info("Kinesis source table 'kinesis_source' created successfully in default catalog");
         
-        // NOW switch to the Glue catalog for Iceberg tables
-        tableEnv.executeSql("USE CATALOG glue_catalog");
-        LOG.info("Switched to catalog: glue_catalog");
+        // NOW switch to the Iceberg catalog for Iceberg tables
+        tableEnv.executeSql("USE CATALOG " + catalogName);
+        LOG.info("Switched to catalog: {}", catalogName);
         
-        // Create database if it doesn't exist
+        // Create database/namespace if it doesn't exist
         String createDatabaseSql = String.format(
-            "CREATE DATABASE IF NOT EXISTS glue_catalog.%s", glueDatabase);
+            "CREATE DATABASE IF NOT EXISTS %s.%s", catalogName, glueDatabase);
         tableEnv.executeSql(createDatabaseSql);
         LOG.info("Database '{}' created or already exists", glueDatabase);
         
@@ -223,13 +260,13 @@ public class FlinkSqlIcebergJob {
         String insertOrdersSql = "INSERT INTO " + database + "." + tablePrefix + "orders\n" +
             "SELECT \n" +
             "    event_id,\n" +
-            "    CAST(event_time AS TIMESTAMP(6)),\n" +
+            "    TO_TIMESTAMP(event_time, 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z'''),\n" +
             "    event_type,\n" +
             "    region,\n" +
-            "    event_date,\n" +
+            "    TO_DATE(event_date, 'yyyy-MM-dd'),\n" +
             "    order_id,\n" +
             "    customer_id,\n" +
-            "    amount,\n" +
+            "    CAST(amount AS DECIMAL(18, 2)),\n" +
             "    currency,\n" +
             "    status,\n" +
             "    metadata\n" +
@@ -243,10 +280,10 @@ public class FlinkSqlIcebergJob {
         String insertUsersSql = "INSERT INTO " + database + "." + tablePrefix + "users\n" +
             "SELECT \n" +
             "    event_id,\n" +
-            "    CAST(event_time AS TIMESTAMP(6)),\n" +
+            "    TO_TIMESTAMP(event_time, 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z'''),\n" +
             "    event_type,\n" +
             "    region,\n" +
-            "    event_date,\n" +
+            "    TO_DATE(event_date, 'yyyy-MM-dd'),\n" +
             "    user_id,\n" +
             "    action,\n" +
             "    device_type,\n" +
@@ -263,10 +300,10 @@ public class FlinkSqlIcebergJob {
         String insertClicksSql = "INSERT INTO " + database + "." + tablePrefix + "clicks\n" +
             "SELECT \n" +
             "    event_id,\n" +
-            "    CAST(event_time AS TIMESTAMP(6)),\n" +
+            "    TO_TIMESTAMP(event_time, 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z'''),\n" +
             "    event_type,\n" +
             "    region,\n" +
-            "    event_date,\n" +
+            "    TO_DATE(event_date, 'yyyy-MM-dd'),\n" +
             "    session_id,\n" +
             "    page_url,\n" +
             "    referrer,\n" +

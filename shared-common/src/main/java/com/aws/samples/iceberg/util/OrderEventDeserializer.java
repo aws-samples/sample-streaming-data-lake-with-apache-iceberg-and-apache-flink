@@ -1,6 +1,7 @@
 package com.aws.samples.iceberg.util;
 
 import com.aws.samples.iceberg.model.OrderEvent;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
@@ -16,7 +17,7 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Kinesis deserializer specifically for OrderEvent.
- * Use this when the stream contains only order events.
+ * Filters out non-ORDER events from the stream silently.
  */
 public class OrderEventDeserializer implements KinesisDeserializationSchema<OrderEvent> {
     
@@ -37,7 +38,18 @@ public class OrderEventDeserializer implements KinesisDeserializationSchema<Orde
             byte[] data = record.data().asByteArray();
             String json = new String(data, StandardCharsets.UTF_8);
             
-            OrderEvent event = objectMapper.readValue(json, OrderEvent.class);
+            // First parse as JsonNode to check event type
+            JsonNode node = objectMapper.readTree(json);
+            String eventType = node.has("event_type") ? node.get("event_type").asText() : null;
+            
+            // Filter: only process ORDER events
+            if (!"ORDER".equals(eventType)) {
+                // Silently skip non-ORDER events - this is expected behavior
+                return;
+            }
+            
+            // Now deserialize as OrderEvent
+            OrderEvent event = objectMapper.treeToValue(node, OrderEvent.class);
             out.collect(event);
             
         } catch (Exception e) {

@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
+import * as s3tables from 'aws-cdk-lib/aws-s3tables';
 import * as kinesisanalytics from 'aws-cdk-lib/aws-kinesisanalyticsv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -14,13 +15,19 @@ import { Construct } from 'constructs';
 export interface IcebergFlinkStackProps extends cdk.StackProps {
   appType: 'datastream' | 'sql' | 'dynamic';
   enableMaintenance: boolean;
+  catalogType?: 'glue' | 's3tables';  // Default: 'glue'
 }
 
 export class IcebergFlinkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: IcebergFlinkStackProps) {
     super(scope, id, props);
 
-    const { appType, enableMaintenance } = props;
+    const { appType, enableMaintenance, catalogType = 'glue' } = props;
+    
+    // Validate: S3 Tables handles maintenance automatically, don't allow enableMaintenance with s3tables
+    if (catalogType === 's3tables' && enableMaintenance) {
+      throw new Error('S3 Tables handles maintenance automatically. Do not enable maintenance when using S3 Tables catalog.');
+    }
 
     // App configuration mapping
     const appConfig = {
@@ -46,16 +53,6 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     const config = appConfig[appType];
 
-    // S3 bucket for Iceberg warehouse (unique per app type)
-    const warehouseBucket = new s3.Bucket(this, 'IcebergWarehouse', {
-      bucketName: `iceberg-warehouse-${appType}-${this.account}`,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,  // Automatically delete objects when stack is destroyed
-      versioned: true,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-    });
-
     // Kinesis stream for events (unique per app type)
     const eventStream = new kinesis.Stream(this, 'EventStream', {
       streamName: `iceberg-events-${appType}`,
@@ -69,19 +66,153 @@ export class IcebergFlinkStack extends cdk.Stack {
     const cfnStream = eventStream.node.defaultChild as kinesis.CfnStream;
     cfnStream.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
 
-    // Glue database for Iceberg catalog (unique per app type)
+    // Database/namespace name (unique per app type)
     const glueDatabaseName = `iceberg_${appType}`;
-    const glueDatabase = new glue.CfnDatabase(this, 'GlueDatabase', {
-      catalogId: this.account,
-      databaseInput: {
-        name: glueDatabaseName,
-        description: `Iceberg tables for ${appType} Flink sample`,
-        locationUri: `s3://${warehouseBucket.bucketName}/warehouse/${appType}`,
-      },
-    });
+    
+    // Resources that differ based on catalog type
+    let warehouseBucket: s3.Bucket | undefined;
+    let glueDatabase: glue.CfnDatabase | undefined;
+    let s3TableBucketArn: string | undefined;
+    let s3TableBucketName: string | undefined;
+    
+    if (catalogType === 'glue') {
+      // S3 bucket for Iceberg warehouse (only needed for Glue catalog)
+      warehouseBucket = new s3.Bucket(this, 'IcebergWarehouse', {
+        bucketName: `iceberg-warehouse-${appType}-${this.account}`,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        autoDeleteObjects: true,
+        versioned: true,
+        encryption: s3.BucketEncryption.S3_MANAGED,
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      });
 
-    // Ensure database is created after bucket
-    glueDatabase.node.addDependency(warehouseBucket);
+      // Glue database for Iceberg catalog
+      glueDatabase = new glue.CfnDatabase(this, 'GlueDatabase', {
+        catalogId: this.account,
+        databaseInput: {
+          name: glueDatabaseName,
+          description: `Iceberg tables for ${appType} Flink sample`,
+          locationUri: `s3://${warehouseBucket.bucketName}/warehouse/${appType}`,
+        },
+      });
+      glueDatabase.node.addDependency(warehouseBucket);
+    } else {
+      // S3 Tables catalog - create S3 Table Bucket (manages storage internally)
+      s3TableBucketName = `iceberg-tables-${appType}-${this.account}`;
+      
+      const tableBucket = new s3tables.CfnTableBucket(this, 'S3TableBucket', {
+        tableBucketName: s3TableBucketName,
+      });
+      tableBucket.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      
+      s3TableBucketArn = tableBucket.attrTableBucketArn;
+      
+      // Create namespace in S3 Tables (equivalent to database)
+      const namespace = new s3tables.CfnNamespace(this, 'S3TablesNamespace', {
+        namespace: glueDatabaseName,
+        tableBucketArn: s3TableBucketArn,
+      });
+      namespace.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+      namespace.node.addDependency(tableBucket);
+      
+      // Custom resource to clean up tables before namespace deletion
+      // S3 Tables namespaces cannot be deleted if they contain tables
+      const cleanupRole = new iam.Role(this, 'S3TablesCleanupRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        ],
+      });
+      
+      cleanupRole.addToPolicy(new iam.PolicyStatement({
+        actions: [
+          's3tables:ListTables',
+          's3tables:DeleteTable',
+          's3tables:GetTable',
+        ],
+        resources: [
+          `arn:aws:s3tables:${this.region}:${this.account}:bucket/${s3TableBucketName}`,
+          `arn:aws:s3tables:${this.region}:${this.account}:bucket/${s3TableBucketName}/table/*`,
+        ],
+      }));
+      
+      const cleanupProvider = new cdk.custom_resources.Provider(this, 'S3TablesCleanupProvider', {
+        onEventHandler: new cdk.aws_lambda.Function(this, 'S3TablesCleanupFunction', {
+          runtime: cdk.aws_lambda.Runtime.PYTHON_3_12,
+          handler: 'index.handler',
+          role: cleanupRole,
+          timeout: cdk.Duration.minutes(5),
+          code: cdk.aws_lambda.Code.fromInline(`
+import boto3
+import cfnresponse
+
+def handler(event, context):
+    print(f"Event: {event}")
+    
+    # Only run cleanup on Delete
+    if event['RequestType'] != 'Delete':
+        cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+        return
+    
+    try:
+        table_bucket_arn = event['ResourceProperties']['TableBucketArn']
+        namespace = event['ResourceProperties']['Namespace']
+        
+        client = boto3.client('s3tables')
+        
+        # List all tables in the namespace
+        paginator = client.get_paginator('list_tables')
+        tables_to_delete = []
+        
+        for page in paginator.paginate(tableBucketARN=table_bucket_arn, namespace=namespace):
+            for table in page.get('tables', []):
+                tables_to_delete.append(table['name'])
+        
+        print(f"Found {len(tables_to_delete)} tables to delete: {tables_to_delete}")
+        
+        # Delete each table
+        for table_name in tables_to_delete:
+            print(f"Deleting table: {table_name}")
+            try:
+                client.delete_table(
+                    tableBucketARN=table_bucket_arn,
+                    namespace=namespace,
+                    name=table_name
+                )
+                print(f"Deleted table: {table_name}")
+            except Exception as e:
+                print(f"Error deleting table {table_name}: {e}")
+        
+        cfnresponse.send(event, context, cfnresponse.SUCCESS, {'TablesDeleted': len(tables_to_delete)})
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        # Still return success to allow stack deletion to proceed
+        cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Error': str(e)})
+`),
+        }),
+      });
+      
+      const cleanup = new cdk.CustomResource(this, 'S3TablesCleanup', {
+        serviceToken: cleanupProvider.serviceToken,
+        properties: {
+          TableBucketArn: s3TableBucketArn,
+          Namespace: glueDatabaseName,
+        },
+      });
+      
+      // IMPORTANT: Dependency ordering for proper deletion sequence
+      // The custom resource cleanup must be deleted BEFORE the namespace
+      // In CloudFormation, deletion order is REVERSE of creation order
+      // So if namespace depends on cleanup:
+      // - CREATE: cleanup first, then namespace
+      // - DELETE: namespace first, then cleanup (WRONG - we need cleanup first!)
+      // 
+      // The trick: make cleanup depend on namespace, so:
+      // - CREATE: namespace first, then cleanup (cleanup does nothing on create)
+      // - DELETE: cleanup first (deletes tables), then namespace (now empty, can be deleted)
+      cleanup.node.addDependency(namespace);
+    }
 
     // Build Flink JAR using Maven in Docker and upload to our own bucket
     // Copies entire project to include parent POM and shared-common module
@@ -232,11 +363,14 @@ export class IcebergFlinkStack extends cdk.Stack {
     );
 
     // Grant permissions
-    warehouseBucket.grantReadWrite(flinkRole);
     eventStream.grantRead(flinkRole);
     
+    // S3 warehouse bucket permissions (only for Glue catalog)
+    if (catalogType === 'glue' && warehouseBucket) {
+      warehouseBucket.grantReadWrite(flinkRole);
+    }
+    
     // CRITICAL: S3 permissions for the specific CDK assets bucket
-    // Cannot use wildcards in the middle of ARN, must be exact bucket name
     flinkRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -271,49 +405,101 @@ export class IcebergFlinkStack extends cdk.Stack {
       })
     );
 
-    // Grant Glue permissions for Iceberg catalog
-    // Read permissions on all databases (Glue catalog validation requires this)
-    flinkRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: [
-          'glue:GetDatabase',
-          'glue:GetDatabases',
-          'glue:GetTable',
-          'glue:GetTables',
-          'glue:GetPartition',
-          'glue:GetPartitions',
-          'glue:BatchGetPartition',
-        ],
-        resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:database/*`,
-          `arn:aws:glue:${this.region}:${this.account}:table/*/*`,
-        ],
-      })
-    );
+    // Grant Glue permissions for Iceberg catalog (only when using Glue)
+    if (catalogType === 'glue') {
+      // Read permissions on all databases (Glue catalog validation requires this)
+      flinkRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: [
+            'glue:GetDatabase',
+            'glue:GetDatabases',
+            'glue:GetTable',
+            'glue:GetTables',
+            'glue:GetPartition',
+            'glue:GetPartitions',
+            'glue:BatchGetPartition',
+          ],
+          resources: [
+            `arn:aws:glue:${this.region}:${this.account}:catalog`,
+            `arn:aws:glue:${this.region}:${this.account}:database/*`,
+            `arn:aws:glue:${this.region}:${this.account}:table/*/*`,
+          ],
+        })
+      );
 
-    // Write permissions scoped to our specific database
-    flinkRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: [
-          'glue:CreateDatabase',
-          'glue:UpdateDatabase',
-          'glue:CreateTable',
-          'glue:UpdateTable',
-          'glue:DeleteTable',
-          'glue:CreatePartition',
-          'glue:BatchCreatePartition',
-          'glue:UpdatePartition',
-          'glue:DeletePartition',
-          'glue:BatchDeletePartition',
-        ],
-        resources: [
-          `arn:aws:glue:${this.region}:${this.account}:catalog`,
-          `arn:aws:glue:${this.region}:${this.account}:database/${glueDatabaseName}`,
-          `arn:aws:glue:${this.region}:${this.account}:table/${glueDatabaseName}/*`,
-        ],
-      })
-    );
+      // Write permissions scoped to our specific database
+      flinkRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: [
+            'glue:CreateDatabase',
+            'glue:UpdateDatabase',
+            'glue:CreateTable',
+            'glue:UpdateTable',
+            'glue:DeleteTable',
+            'glue:CreatePartition',
+            'glue:BatchCreatePartition',
+            'glue:UpdatePartition',
+            'glue:DeletePartition',
+            'glue:BatchDeletePartition',
+          ],
+          resources: [
+            `arn:aws:glue:${this.region}:${this.account}:catalog`,
+            `arn:aws:glue:${this.region}:${this.account}:database/${glueDatabaseName}`,
+            `arn:aws:glue:${this.region}:${this.account}:table/${glueDatabaseName}/*`,
+          ],
+        })
+      );
+    } else {
+      // S3 Tables permissions - complete API access
+      // Reference: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazons3tables.html
+      flinkRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'S3TablesTableBucketAccess',
+          actions: [
+            // Table Bucket operations
+            's3tables:GetTableBucket',
+            's3tables:ListTableBuckets',
+            's3tables:GetTableBucketMaintenanceConfiguration',
+            // Namespace operations
+            's3tables:CreateNamespace',
+            's3tables:GetNamespace',
+            's3tables:ListNamespaces',
+            's3tables:DeleteNamespace',
+            // Table operations that require bucket-level permission
+            's3tables:CreateTable',  // CreateTable is a bucket-level action
+            's3tables:ListTables',
+          ],
+          resources: [
+            `arn:aws:s3tables:${this.region}:${this.account}:bucket/${s3TableBucketName}`,
+          ],
+        })
+      );
+      
+      flinkRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'S3TablesTableAccess',
+          actions: [
+            // Table metadata operations (require table-level permission)
+            's3tables:GetTable',
+            's3tables:DeleteTable',
+            's3tables:RenameTable',
+            's3tables:GetTableMetadataLocation',
+            's3tables:UpdateTableMetadataLocation',
+            's3tables:GetTableMaintenanceConfiguration',
+            's3tables:PutTableMaintenanceConfiguration',
+            // Table data operations (CRITICAL for reading/writing data)
+            's3tables:GetTableData',
+            's3tables:PutTableData',
+            // Table policy operations
+            's3tables:GetTablePolicy',
+            's3tables:PutTablePolicy',
+          ],
+          resources: [
+            `arn:aws:s3tables:${this.region}:${this.account}:bucket/${s3TableBucketName}/table/*`,
+          ],
+        })
+      );
+    }
 
     // CloudWatch Metrics - Flink publishes application metrics
     flinkRole.addToPolicy(
@@ -364,13 +550,14 @@ export class IcebergFlinkStack extends cdk.Stack {
       dbSecret.grantRead(flinkRole);
     }
 
-    // // Build runtime properties based on app type and maintenance setting
-    const runtimeProperties = this.buildRuntimeProperties(appType, enableMaintenance, {
+    // Build runtime properties based on app type and maintenance setting
+    const runtimeProperties = this.buildRuntimeProperties(appType, enableMaintenance, catalogType, {
       kinesisStreamArn: eventStream.streamArn,
-      warehousePath: `s3://${warehouseBucket.bucketName}/warehouse`,
+      warehousePath: warehouseBucket ? `s3://${warehouseBucket.bucketName}/warehouse` : '',
       region: this.region,
       dbEndpoint: database?.dbInstanceEndpointAddress,
       dbSecretArn: dbSecret?.secretArn,
+      s3TableBucketArn: s3TableBucketArn,
     });
 
     // // Create Flink application
@@ -435,9 +622,13 @@ export class IcebergFlinkStack extends cdk.Stack {
     // Ensure Flink app is created after JAR is uploaded and role is ready
     flinkApp.node.addDependency(flinkJarAsset);
     flinkApp.node.addDependency(flinkRole);
-    flinkApp.node.addDependency(warehouseBucket);
     flinkApp.node.addDependency(eventStream);
-    flinkApp.node.addDependency(glueDatabase);
+    if (warehouseBucket) {
+      flinkApp.node.addDependency(warehouseBucket);
+    }
+    if (glueDatabase) {
+      flinkApp.node.addDependency(glueDatabase);
+    }
     flinkApp.node.addDependency(logGroup);
     flinkApp.node.addDependency(logStream);
 
@@ -461,15 +652,29 @@ export class IcebergFlinkStack extends cdk.Stack {
       description: 'Kinesis stream name for events',
     });
 
-    new cdk.CfnOutput(this, 'WarehouseBucket', {
-      value: warehouseBucket.bucketName,
-      description: 'S3 bucket for Iceberg warehouse',
-    });
+    if (warehouseBucket) {
+      new cdk.CfnOutput(this, 'WarehouseBucket', {
+        value: warehouseBucket.bucketName,
+        description: 'S3 bucket for Iceberg warehouse',
+      });
+    }
 
     new cdk.CfnOutput(this, 'GlueDatabaseName', {
       value: glueDatabaseName,
-      description: 'Glue database for Iceberg tables',
+      description: 'Database name for Iceberg tables',
     });
+    
+    new cdk.CfnOutput(this, 'CatalogType', {
+      value: catalogType,
+      description: 'Catalog type (glue or s3tables)',
+    });
+    
+    if (s3TableBucketArn) {
+      new cdk.CfnOutput(this, 'S3TableBucketArn', {
+        value: s3TableBucketArn,
+        description: 'S3 Table Bucket ARN for Iceberg tables',
+      });
+    }
 
     new cdk.CfnOutput(this, 'AppType', {
       value: appType,
@@ -485,21 +690,34 @@ export class IcebergFlinkStack extends cdk.Stack {
   private buildRuntimeProperties(
     appType: string,
     enableMaintenance: boolean,
+    catalogType: string,
     resources: {
       kinesisStreamArn: string;
       warehousePath: string;
       region: string;
       dbEndpoint?: string;
       dbSecretArn?: string;
+      s3TableBucketArn?: string;
     }
   ): { [key: string]: string } {
+    // Base properties common to all configurations
     const baseProps: { [key: string]: string } = {
       'aws.region': resources.region,
-      'iceberg.warehouse': resources.warehousePath,
-      'iceberg.catalog.name': 'glue_catalog',
+      'iceberg.catalog.name': catalogType === 's3tables' ? 's3tables_catalog' : 'glue_catalog',
+      'iceberg.catalog.type': catalogType,
       'iceberg.database': `iceberg_${appType}`,
       'checkpoint.interval.ms': '60000',
     };
+    
+    // Add warehouse path only for Glue catalog (S3 Tables manages storage internally)
+    if (catalogType === 'glue' && resources.warehousePath) {
+      baseProps['iceberg.warehouse'] = resources.warehousePath;
+    }
+    
+    // Add S3 Tables specific properties
+    if (catalogType === 's3tables' && resources.s3TableBucketArn) {
+      baseProps['s3tables.bucket.arn'] = resources.s3TableBucketArn;
+    }
 
     if (appType === 'datastream') {
       const props = {
@@ -520,13 +738,19 @@ export class IcebergFlinkStack extends cdk.Stack {
       }
       return props;
     } else if (appType === 'sql') {
-      return {
+      const sqlProps: { [key: string]: string } = {
         ...baseProps,
         'kinesis.stream.name': `iceberg-events-${appType}`,
-        's3.warehouse.path': resources.warehousePath,  // SQL job expects this property name
         'glue.database': `iceberg_${appType}`,  // SQL job expects this property name
         'table.prefix': 'sql_',
       };
+      
+      // Add warehouse path only for Glue catalog
+      if (catalogType === 'glue' && resources.warehousePath) {
+        sqlProps['s3.warehouse.path'] = resources.warehousePath;
+      }
+      
+      return sqlProps;
     } else {
       // dynamic
       return {
