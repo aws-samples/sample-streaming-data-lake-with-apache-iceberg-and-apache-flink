@@ -1,8 +1,7 @@
 package com.aws.samples.iceberg.dynamic;
 
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
-import com.aws.samples.iceberg.model.BaseEvent;
-import com.aws.samples.iceberg.util.BaseEventDeserializer;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kinesis.source.KinesisStreamsSource;
@@ -17,26 +16,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
 /**
- * Dynamic Iceberg Sink sample demonstrating automatic table routing and schema evolution.
+ * Schema-Agnostic Dynamic Iceberg Sink Job.
  * 
- * This job reads mixed event types from Kinesis and dynamically routes them to different
- * Iceberg tables based on event_type field:
- * - ORDER events → orders table
- * - USER events → users table
- * - CLICK events → clicks table
+ * This job demonstrates truly schema-agnostic event processing:
+ * - Reads raw JSON from Kinesis without typed POJOs
+ * - Infers Iceberg schema dynamically from JSON structure
+ * - Routes to tables based on a configurable field (default: event_type)
+ * - Handles ANY JSON structure without code changes
+ * - Supports schema evolution as new fields appear
  * 
- * Features demonstrated:
- * - Dynamic table routing based on record content
- * - Automatic schema evolution when new fields are added
- * - Auto table creation with inferred schema
- * - Table metadata caching for performance
+ * Table naming: {routing_field_value}_events (e.g., order_events, user_events)
  * 
- * Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6
+ * Configuration:
+ * - routing.field: Field used for table routing (default: event_type)
+ * - routing.table.suffix: Suffix for auto-generated table names (default: _events)
+ * - partition.candidates: Comma-separated fields to use for partitioning
  */
 public class DynamicSinkJob {
     
@@ -46,29 +47,32 @@ public class DynamicSinkJob {
     private static final String KINESIS_STREAM_ARN = "kinesis.stream.arn";
     private static final String KINESIS_REGION = "kinesis.region";
     private static final String ICEBERG_CATALOG_NAME = "iceberg.catalog.name";
+    private static final String ICEBERG_CATALOG_TYPE = "iceberg.catalog.type";
     private static final String ICEBERG_DATABASE = "iceberg.database";
     private static final String ICEBERG_WAREHOUSE = "iceberg.warehouse";
+    private static final String S3TABLES_BUCKET_ARN = "s3tables.bucket.arn";
     private static final String AWS_REGION = "aws.region";
     private static final String CHECKPOINT_INTERVAL = "checkpoint.interval.ms";
     private static final String CACHE_MAX_SIZE = "cache.max.size";
     private static final String CACHE_REFRESH_MS = "cache.refresh.ms";
-    private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE = "flink-application-properties-dev.json";
     
-    /**
-     * Check if running in local execution mode.
-     */
+    // Schema-agnostic routing configuration
+    private static final String ROUTING_FIELD = "routing.field";
+    private static final String ROUTING_TABLE_SUFFIX = "routing.table.suffix";
+    private static final String PARTITION_CANDIDATES = "partition.candidates";
+    
+    private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE = "flink-application-properties-dev.json";
+
+    
     private static boolean isLocal(StreamExecutionEnvironment env) {
         return env instanceof LocalStreamEnvironment;
     }
     
-    /**
-     * Create execution environment with Web UI for local development.
-     */
     private static StreamExecutionEnvironment createExecutionEnvironment() {
         try {
             StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
             if (isLocal(env)) {
-                org.apache.flink.configuration.Configuration config = new org.apache.flink.configuration.Configuration();
+                Configuration config = new Configuration();
                 config.setString("rest.port", "8083");
                 config.setString("rest.bind-address", "localhost");
                 env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(config);
@@ -81,9 +85,6 @@ public class DynamicSinkJob {
         }
     }
     
-    /**
-     * Load application properties from runtime or local file.
-     */
     private static Map<String, String> loadApplicationProperties(StreamExecutionEnvironment env) throws Exception {
         Map<String, String> config = new HashMap<>();
         
@@ -93,13 +94,11 @@ public class DynamicSinkJob {
                 DynamicSinkJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
             );
             Properties flinkProps = props.getOrDefault("FlinkApplicationProperties", new Properties());
-            
             flinkProps.forEach((key, value) -> config.put(key.toString(), value.toString()));
         } else {
             LOG.info("Loading application properties from Amazon Managed Service for Apache Flink");
             Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties();
             Properties flinkProps = props.getOrDefault("FlinkApplicationProperties", new Properties());
-            
             flinkProps.forEach((key, value) -> config.put(key.toString(), value.toString()));
         }
         
@@ -107,66 +106,49 @@ public class DynamicSinkJob {
     }
     
     public static void main(String[] args) throws Exception {
-        LOG.info("Starting Dynamic Iceberg Sink Job");
+        LOG.info("Starting Schema-Agnostic Dynamic Iceberg Sink Job");
         
-        // Set up Flink execution environment
         StreamExecutionEnvironment env = createExecutionEnvironment();
-        
-        // Load configuration from runtime properties
         Map<String, String> config = loadApplicationProperties(env);
         
-        // Configure checkpointing for local development only
-        // AWS Managed Flink configures checkpointing automatically
         if (isLocal(env)) {
             configureCheckpointing(env, config);
         } else {
             LOG.info("Running on AWS Managed Flink - checkpointing configured by the service");
         }
         
-        // Create Kinesis source for mixed event types
-        KinesisStreamsSource<BaseEvent> kinesisSource = createKinesisSource(config);
+        // Create Kinesis source for raw JSON (schema-agnostic)
+        KinesisStreamsSource<JsonNode> kinesisSource = createKinesisSource(config);
         
-        // Read from Kinesis with watermark strategy
-        // Explicitly provide TypeInformation to avoid type erasure issues on Managed Flink
-        DataStream<BaseEvent> events = env.fromSource(
+        DataStream<JsonNode> events = env.fromSource(
             kinesisSource,
             createWatermarkStrategy(),
-            "Kinesis Source",
-            org.apache.flink.api.common.typeinfo.TypeInformation.of(BaseEvent.class)
+            "Kinesis Source (Schema-Agnostic)",
+            org.apache.flink.api.common.typeinfo.TypeInformation.of(JsonNode.class)
         )
         .uid("kinesis-source-dynamic")
-        .name("Read from Kinesis (Mixed Events)");
+        .name("Read from Kinesis (Raw JSON)");
         
-        // Create Iceberg catalog loader
         CatalogLoader catalogLoader = createCatalogLoader(config);
-        
-        // Configure Dynamic Iceberg Sink
         configureDynamicSink(events, catalogLoader, config);
         
-        LOG.info("Dynamic Iceberg Sink Job configured successfully");
+        LOG.info("Schema-Agnostic Dynamic Iceberg Sink Job configured successfully");
         
-        // Add shutdown hook for graceful termination
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOG.info("Shutdown signal received, cleaning up resources...");
         }));
         
-        // Execute the job
         try {
-            env.execute("Dynamic Iceberg Sink Job - Multi-Table Routing");
+            env.execute("Dynamic Iceberg Sink Job - Schema Agnostic");
         } catch (Exception e) {
             LOG.error("Job execution failed", e);
             throw e;
         }
     }
+
     
-    /**
-     * Configure checkpointing for local development only.
-     * AWS Managed Flink configures checkpointing automatically.
-     */
     private static void configureCheckpointing(StreamExecutionEnvironment env, Map<String, String> config) {
-        long checkpointInterval = Long.parseLong(
-            config.getOrDefault(CHECKPOINT_INTERVAL, "60000")
-        );
+        long checkpointInterval = Long.parseLong(config.getOrDefault(CHECKPOINT_INTERVAL, "60000"));
         
         LOG.info("Configuring checkpointing for local development");
         
@@ -175,24 +157,19 @@ public class DynamicSinkJob {
         CheckpointConfig checkpointConfig = env.getCheckpointConfig();
         checkpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
         checkpointConfig.setMinPauseBetweenCheckpoints(30000);
-        checkpointConfig.setCheckpointTimeout(600000);  // 10 minutes
+        checkpointConfig.setCheckpointTimeout(600000);
         checkpointConfig.setMaxConcurrentCheckpoints(1);
         checkpointConfig.setTolerableCheckpointFailureNumber(3);
         checkpointConfig.setExternalizedCheckpointCleanup(
             CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION
         );
-        
-        // Enable unaligned checkpoints for better performance under backpressure
         checkpointConfig.enableUnalignedCheckpoints(true);
         checkpointConfig.setAlignedCheckpointTimeout(Duration.ofSeconds(30));
         
-        LOG.info("Checkpointing configured: interval={}ms, mode=EXACTLY_ONCE, unaligned=true", checkpointInterval);
+        LOG.info("Checkpointing configured: interval={}ms, mode=EXACTLY_ONCE", checkpointInterval);
     }
     
-    /**
-     * Create Kinesis source with BaseEvent deserializer for mixed event types.
-     */
-    private static KinesisStreamsSource<BaseEvent> createKinesisSource(Map<String, String> config) {
+    private static KinesisStreamsSource<JsonNode> createKinesisSource(Map<String, String> config) {
         String streamArn = config.get(KINESIS_STREAM_ARN);
         String region = config.get(KINESIS_REGION);
         
@@ -206,58 +183,82 @@ public class DynamicSinkJob {
         sourceConfig.setString("aws.region", region);
         sourceConfig.setString("flink.stream.initpos", "LATEST");
         
-        return KinesisStreamsSource.<BaseEvent>builder()
+        return KinesisStreamsSource.<JsonNode>builder()
             .setStreamArn(streamArn)
-            .setDeserializationSchema(new BaseEventDeserializer())
+            .setDeserializationSchema(new JsonNodeDeserializer())
             .setSourceConfig(sourceConfig)
             .build();
     }
     
-    /**
-     * Create watermark strategy for handling out-of-order events.
-     */
-    private static WatermarkStrategy<BaseEvent> createWatermarkStrategy() {
+    private static WatermarkStrategy<JsonNode> createWatermarkStrategy() {
         return WatermarkStrategy
-            .<BaseEvent>forBoundedOutOfOrderness(Duration.ofMinutes(1))
-            .withTimestampAssigner((event, timestamp) -> event.getEventTime().toEpochMilli())
+            .<JsonNode>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+            .withTimestampAssigner((json, timestamp) -> {
+                // Try to extract event_time from JSON
+                if (json.has("event_time")) {
+                    try {
+                        String eventTime = json.get("event_time").asText();
+                        return java.time.Instant.parse(eventTime).toEpochMilli();
+                    } catch (Exception e) {
+                        // Fall back to processing time
+                    }
+                }
+                return System.currentTimeMillis();
+            })
             .withIdleness(Duration.ofMinutes(5));
     }
     
-    /**
-     * Create Iceberg catalog loader with Glue Catalog configuration.
-     */
     private static CatalogLoader createCatalogLoader(Map<String, String> config) {
         String catalogName = config.getOrDefault(ICEBERG_CATALOG_NAME, "glue_catalog");
+        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
         String warehouse = config.get(ICEBERG_WAREHOUSE);
         String awsRegion = config.get(AWS_REGION);
         
-        if (warehouse == null || warehouse.isEmpty()) {
-            throw new IllegalArgumentException("Iceberg warehouse path is required");
-        }
-        
         Map<String, String> catalogProperties = new HashMap<>();
         catalogProperties.put("type", "iceberg");
-        catalogProperties.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
-        catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-        catalogProperties.put("warehouse", warehouse);
-        catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
         
-        LOG.info("Creating catalog loader: {} with warehouse: {}", catalogName, warehouse);
-        
-        return CatalogLoader.custom(
-            catalogName,
-            catalogProperties,
-            new org.apache.hadoop.conf.Configuration(),
-            "org.apache.iceberg.aws.glue.GlueCatalog"
-        );
+        if ("s3tables".equals(catalogType)) {
+            String s3TableBucketArn = config.get(S3TABLES_BUCKET_ARN);
+            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
+                throw new IllegalArgumentException("S3 Tables bucket ARN is required when using S3 Tables catalog");
+            }
+            
+            catalogProperties.put("catalog-impl", "software.amazon.s3tables.iceberg.S3TablesCatalog");
+            catalogProperties.put("warehouse", s3TableBucketArn);
+            catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
+            
+            LOG.info("Creating S3 Tables catalog: {} with bucket: {}", catalogName, s3TableBucketArn);
+            
+            return CatalogLoader.custom(
+                catalogName,
+                catalogProperties,
+                new org.apache.hadoop.conf.Configuration(),
+                "software.amazon.s3tables.iceberg.S3TablesCatalog"
+            );
+        } else {
+            if (warehouse == null || warehouse.isEmpty()) {
+                throw new IllegalArgumentException("Iceberg warehouse path is required");
+            }
+            
+            catalogProperties.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
+            catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+            catalogProperties.put("warehouse", warehouse);
+            catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
+            
+            LOG.info("Creating Glue catalog: {} with warehouse: {}", catalogName, warehouse);
+            
+            return CatalogLoader.custom(
+                catalogName,
+                catalogProperties,
+                new org.apache.hadoop.conf.Configuration(),
+                "org.apache.iceberg.aws.glue.GlueCatalog"
+            );
+        }
     }
+
     
-    /**
-     * Configure Dynamic Iceberg Sink with automatic routing and schema evolution.
-     * Requirements: 4.1, 4.2, 4.4, 4.5, 4.6
-     */
     private static void configureDynamicSink(
-            DataStream<BaseEvent> events,
+            DataStream<JsonNode> events,
             CatalogLoader catalogLoader,
             Map<String, String> config) {
         
@@ -265,64 +266,44 @@ public class DynamicSinkJob {
         int cacheMaxSize = Integer.parseInt(config.getOrDefault(CACHE_MAX_SIZE, "100"));
         long cacheRefreshMs = Long.parseLong(config.getOrDefault(CACHE_REFRESH_MS, "60000"));
         
-        LOG.info("Configuring Dynamic Iceberg Sink:");
+        // Schema-agnostic routing configuration
+        String routingField = config.getOrDefault(ROUTING_FIELD, "event_type");
+        String tableSuffix = config.getOrDefault(ROUTING_TABLE_SUFFIX, "_events");
+        String partitionCandidatesStr = config.getOrDefault(PARTITION_CANDIDATES, "event_date,region,date");
+        List<String> partitionCandidates = Arrays.asList(partitionCandidatesStr.split(","));
+        
+        LOG.info("Configuring Schema-Agnostic Dynamic Iceberg Sink:");
         LOG.info("  Database: {}", database);
+        LOG.info("  Routing Field: {}", routingField);
+        LOG.info("  Table Suffix: {}", tableSuffix);
+        LOG.info("  Partition Candidates: {}", partitionCandidates);
         LOG.info("  Cache Max Size: {}", cacheMaxSize);
         LOG.info("  Cache Refresh: {} ms", cacheRefreshMs);
         
-        // Create event routing generator
-        EventRoutingGenerator generator = new EventRoutingGenerator(database);
+        // Create schema-agnostic routing generator
+        SchemaAgnosticRoutingGenerator generator = new SchemaAgnosticRoutingGenerator(
+            database,
+            routingField,
+            null,  // No explicit table name field
+            tableSuffix,
+            partitionCandidates
+        );
         
-        // Configure Dynamic Iceberg Sink
-        // Note: writeParallelism not set - uses environment default (controlled by Managed Flink)
         DynamicIcebergSink.forInput(events)
             .generator(generator)
             .catalogLoader(catalogLoader)
-            .immediateTableUpdate(true)  // Enable immediate schema evolution
-            .cacheMaxSize(cacheMaxSize)  // Cache table metadata
-            .cacheRefreshMs(cacheRefreshMs)  // Refresh cache periodically
+            .immediateTableUpdate(true)
+            .cacheMaxSize(cacheMaxSize)
+            .cacheRefreshMs(cacheRefreshMs)
             .set("write.format.default", "parquet")
             .set("format-version", "3")
             .set("write.delete.mode", "merge-on-read")
             .set("write.update.mode", "merge-on-read")
-            .set("write.merge.mode", "merge-on-read")            .set("write.target-file-size-bytes", "134217728")
+            .set("write.merge.mode", "merge-on-read")
+            .set("write.target-file-size-bytes", "134217728")
             .set("write.parquet.compression-codec", "snappy")
             .append();
         
-        LOG.info("Dynamic Iceberg Sink configured successfully with automatic routing and schema evolution");
-    }
-    
-    /**
-     * Parse configuration from environment variables or command-line arguments.
-     */
-    private static Map<String, String> parseConfiguration(String[] args) {
-        Map<String, String> config = new HashMap<>();
-        
-        // Read from environment variables
-        config.put(KINESIS_STREAM_ARN, getEnvOrDefault("KINESIS_STREAM_ARN", ""));
-        config.put(KINESIS_REGION, getEnvOrDefault("KINESIS_REGION", "us-east-1"));
-        config.put(ICEBERG_CATALOG_NAME, getEnvOrDefault("ICEBERG_CATALOG_NAME", "glue_catalog"));
-        config.put(ICEBERG_DATABASE, getEnvOrDefault("ICEBERG_DATABASE", "iceberg_samples"));
-        config.put(ICEBERG_WAREHOUSE, getEnvOrDefault("ICEBERG_WAREHOUSE", ""));
-        config.put(AWS_REGION, getEnvOrDefault("AWS_REGION", "us-east-1"));
-        config.put(CHECKPOINT_INTERVAL, getEnvOrDefault("CHECKPOINT_INTERVAL_MS", "60000"));
-        config.put(CACHE_MAX_SIZE, getEnvOrDefault("CACHE_MAX_SIZE", "100"));
-        config.put(CACHE_REFRESH_MS, getEnvOrDefault("CACHE_REFRESH_MS", "60000"));
-        
-        // Override with command-line arguments if provided
-        for (int i = 0; i < args.length - 1; i += 2) {
-            String key = args[i].replaceFirst("^--", "");
-            String value = args[i + 1];
-            config.put(key, value);
-        }
-        
-        LOG.info("Configuration loaded: {}", config);
-        
-        return config;
-    }
-    
-    private static String getEnvOrDefault(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value != null ? value : defaultValue;
+        LOG.info("Schema-Agnostic Dynamic Iceberg Sink configured successfully");
     }
 }

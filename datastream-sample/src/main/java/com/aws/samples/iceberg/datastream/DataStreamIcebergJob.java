@@ -54,9 +54,11 @@ public class DataStreamIcebergJob {
     private static final String KINESIS_STREAM_ARN = "kinesis.stream.arn";
     private static final String KINESIS_REGION = "kinesis.region";
     private static final String ICEBERG_CATALOG_NAME = "iceberg.catalog.name";
+    private static final String ICEBERG_CATALOG_TYPE = "iceberg.catalog.type";
     private static final String ICEBERG_DATABASE = "iceberg.database";
     private static final String ICEBERG_TABLE = "iceberg.table";
     private static final String ICEBERG_WAREHOUSE = "iceberg.warehouse";
+    private static final String S3TABLES_BUCKET_ARN = "s3tables.bucket.arn";
     private static final String AWS_REGION = "aws.region";
     private static final String CHECKPOINT_INTERVAL = "checkpoint.interval.ms";
     private static final String ICEBERG_BRANCH = "iceberg.branch";  // Optional branch for staging writes
@@ -86,9 +88,11 @@ public class DataStreamIcebergJob {
             config.put(KINESIS_STREAM_ARN, getEnvOrDefault("KINESIS_STREAM_ARN", ""));
             config.put(KINESIS_REGION, getEnvOrDefault("KINESIS_REGION", "us-east-1"));
             config.put(ICEBERG_CATALOG_NAME, getEnvOrDefault("ICEBERG_CATALOG_NAME", "glue_catalog"));
+            config.put(ICEBERG_CATALOG_TYPE, getEnvOrDefault("ICEBERG_CATALOG_TYPE", "glue"));
             config.put(ICEBERG_DATABASE, getEnvOrDefault("ICEBERG_DATABASE", "iceberg_samples"));
             config.put(ICEBERG_TABLE, getEnvOrDefault("ICEBERG_TABLE", "orders"));
             config.put(ICEBERG_WAREHOUSE, getEnvOrDefault("ICEBERG_WAREHOUSE", ""));
+            config.put(S3TABLES_BUCKET_ARN, getEnvOrDefault("S3TABLES_BUCKET_ARN", ""));
             config.put(AWS_REGION, getEnvOrDefault("AWS_REGION", "us-east-1"));
             config.put(CHECKPOINT_INTERVAL, getEnvOrDefault("CHECKPOINT_INTERVAL_MS", "60000"));
             config.put(ICEBERG_BRANCH, getEnvOrDefault("ICEBERG_BRANCH", ""));
@@ -106,9 +110,11 @@ public class DataStreamIcebergJob {
             config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", ""));
             config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-east-1"));
             config.put(ICEBERG_CATALOG_NAME, flinkProps.getProperty("iceberg.catalog.name", "glue_catalog"));
+            config.put(ICEBERG_CATALOG_TYPE, flinkProps.getProperty("iceberg.catalog.type", "glue"));
             config.put(ICEBERG_DATABASE, flinkProps.getProperty("iceberg.database", "iceberg_samples"));
             config.put(ICEBERG_TABLE, flinkProps.getProperty("iceberg.table", "orders"));
             config.put(ICEBERG_WAREHOUSE, flinkProps.getProperty("iceberg.warehouse", ""));
+            config.put(S3TABLES_BUCKET_ARN, flinkProps.getProperty("s3tables.bucket.arn", ""));
             config.put(AWS_REGION, flinkProps.getProperty("aws.region", "us-east-1"));
             config.put(CHECKPOINT_INTERVAL, flinkProps.getProperty("checkpoint.interval.ms", "60000"));
             config.put(ICEBERG_BRANCH, flinkProps.getProperty("iceberg.branch", ""));
@@ -217,13 +223,25 @@ public class DataStreamIcebergJob {
      */
     private static void validateConfiguration(Map<String, String> config) {
         String streamArn = config.get(KINESIS_STREAM_ARN);
+        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
         String warehouse = config.get(ICEBERG_WAREHOUSE);
+        String s3TableBucketArn = config.get(S3TABLES_BUCKET_ARN);
         
         if (streamArn == null || streamArn.isEmpty()) {
             throw new IllegalArgumentException("KINESIS_STREAM_ARN is required");
         }
-        if (warehouse == null || warehouse.isEmpty()) {
-            throw new IllegalArgumentException("ICEBERG_WAREHOUSE is required");
+        
+        // Validate catalog-specific requirements
+        if ("s3tables".equals(catalogType)) {
+            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
+                throw new IllegalArgumentException("S3TABLES_BUCKET_ARN is required when using S3 Tables catalog");
+            }
+            LOG.info("Using S3 Tables catalog with bucket ARN: {}", s3TableBucketArn);
+        } else {
+            if (warehouse == null || warehouse.isEmpty()) {
+                throw new IllegalArgumentException("ICEBERG_WAREHOUSE is required when using Glue catalog");
+            }
+            LOG.info("Using Glue catalog with warehouse: {}", warehouse);
         }
         
         LOG.info("Configuration validated successfully");
@@ -358,33 +376,57 @@ public class DataStreamIcebergJob {
     }
     
     /**
-     * Create Iceberg catalog loader with Glue Catalog configuration.
+     * Create Iceberg catalog loader with Glue Catalog or S3 Tables Catalog configuration.
      * Requirements: 3.2
      */
     private static CatalogLoader createCatalogLoader(Map<String, String> config) {
         String catalogName = config.getOrDefault(ICEBERG_CATALOG_NAME, "glue_catalog");
+        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
         String warehouse = config.get(ICEBERG_WAREHOUSE);
         String awsRegion = config.get(AWS_REGION);
         
-        if (warehouse == null || warehouse.isEmpty()) {
-            throw new IllegalArgumentException("Iceberg warehouse path is required");
-        }
-        
         Map<String, String> catalogProperties = new HashMap<>();
         catalogProperties.put("type", "iceberg");
-        catalogProperties.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
-        catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-        catalogProperties.put("warehouse", warehouse);
-        catalogProperties.put("aws.region", awsRegion != null ? awsRegion : "us-east-1");
         
-        LOG.info("Creating catalog loader: {} with warehouse: {}", catalogName, warehouse);
-        
-        return CatalogLoader.custom(
-            catalogName,
-            catalogProperties,
-            new org.apache.hadoop.conf.Configuration(),
-            "org.apache.iceberg.aws.glue.GlueCatalog"
-        );
+        if ("s3tables".equals(catalogType)) {
+            // S3 Tables Catalog configuration
+            String s3TableBucketArn = config.get(S3TABLES_BUCKET_ARN);
+            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
+                throw new IllegalArgumentException("S3 Tables bucket ARN is required when using S3 Tables catalog");
+            }
+            
+            catalogProperties.put("catalog-impl", "software.amazon.s3tables.iceberg.S3TablesCatalog");
+            catalogProperties.put("warehouse", s3TableBucketArn);
+            catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
+            
+            LOG.info("Creating S3 Tables catalog loader: {} with table bucket: {}", catalogName, s3TableBucketArn);
+            
+            return CatalogLoader.custom(
+                catalogName,
+                catalogProperties,
+                new org.apache.hadoop.conf.Configuration(),
+                "software.amazon.s3tables.iceberg.S3TablesCatalog"
+            );
+        } else {
+            // Glue Catalog configuration (default)
+            if (warehouse == null || warehouse.isEmpty()) {
+                throw new IllegalArgumentException("Iceberg warehouse path is required");
+            }
+            
+            catalogProperties.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
+            catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+            catalogProperties.put("warehouse", warehouse);
+            catalogProperties.put("aws.region", awsRegion != null ? awsRegion : "us-east-1");
+            
+            LOG.info("Creating Glue catalog loader: {} with warehouse: {}", catalogName, warehouse);
+            
+            return CatalogLoader.custom(
+                catalogName,
+                catalogProperties,
+                new org.apache.hadoop.conf.Configuration(),
+                "org.apache.iceberg.aws.glue.GlueCatalog"
+            );
+        }
     }
     
     /**
@@ -453,9 +495,13 @@ public class DataStreamIcebergJob {
         sinkBuilder.append();
         
         // Check if maintenance is enabled
+        // Note: S3 Tables handles maintenance automatically, so skip if using S3 Tables
+        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
         boolean enableMaintenance = Boolean.parseBoolean(config.getOrDefault(ENABLE_MAINTENANCE, "false"));
         
-        if (enableMaintenance) {
+        if ("s3tables".equals(catalogType)) {
+            LOG.info("Using S3 Tables catalog - maintenance is handled automatically by the service");
+        } else if (enableMaintenance) {
             LOG.info("Maintenance ENABLED - configuring table maintenance topology");
             try {
                 TriggerLockFactory lockFactory = createJdbcLockFactory(config);

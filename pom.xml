@@ -198,6 +198,30 @@
                     </exclusion>
                 </exclusions>
             </dependency>
+            
+            <!-- S3 Tables Dependencies -->
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>s3tables</artifactId>
+                <version>${aws.sdk.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-classic</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>software.amazon.s3tables</groupId>
+                <artifactId>s3-tables-catalog-for-iceberg</artifactId>
+                <version>0.1.8</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-classic</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
 
             <!-- Hadoop Dependencies -->
             <dependency>

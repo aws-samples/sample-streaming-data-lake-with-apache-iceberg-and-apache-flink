@@ -313,6 +313,50 @@ cdk deploy -c appType=dynamic
 
 **Cost:** ~$5-6/day
 
+#### Option E: DataStream with S3 Tables (Native Iceberg)
+```bash
+cdk deploy -c appType=datastream -c catalogType=s3tables
+```
+
+**Deploys:**
+- Kinesis Data Stream
+- S3 Table Bucket (native Iceberg storage)
+- S3 Tables namespace
+- Managed Flink application
+
+**Key Benefits:**
+- S3 Tables handles compaction and maintenance automatically
+- No need for RDS or VPC for maintenance coordination
+- Native Iceberg support with automatic optimization
+- Simplified operations
+
+**Note:** S3 Tables is not compatible with `enableMaintenance=true` since it handles maintenance automatically.
+
+**Cost:** ~$5-6/day (plus S3 Tables storage costs)
+
+#### Option F: Dynamic Sink with S3 Tables
+```bash
+cdk deploy -c appType=dynamic -c catalogType=s3tables
+```
+
+**Deploys:**
+- Kinesis, S3 Table Bucket, Flink application
+- Dynamic table creation with S3 Tables
+
+**Cost:** ~$5-6/day
+
+#### Option G: SQL API with S3 Tables
+```bash
+cdk deploy -c appType=sql -c catalogType=s3tables
+```
+
+**Deploys:**
+- Kinesis Data Stream
+- S3 Table Bucket (native Iceberg storage)
+- Managed Flink application with SQL multi-table routing
+
+**Cost:** ~$5-6/day
+
 ### Step 3: Note the Outputs
 CDK will output important values:
 ```
@@ -420,8 +464,22 @@ Each application reads configuration from runtime properties:
   "aws.region": "us-east-1",
   "iceberg.warehouse": "s3://bucket/warehouse",
   "iceberg.catalog.name": "glue_catalog",
+  "iceberg.catalog.type": "glue",
   "iceberg.database": "iceberg_samples",
   "checkpoint.interval.ms": "60000"
+}
+```
+
+**Catalog Types:**
+- `glue` (default): Uses AWS Glue Data Catalog for metadata, S3 for data storage
+- `s3tables`: Uses S3 Tables for native Iceberg storage with automatic maintenance
+
+**S3 Tables Specific:**
+```json
+{
+  "iceberg.catalog.type": "s3tables",
+  "iceberg.catalog.name": "s3tables_catalog",
+  "s3tables.bucket.arn": "arn:aws:s3tables:region:account:bucket/bucket-name"
 }
 ```
 
@@ -530,6 +588,7 @@ iceberg-flink-samples/
 
 ### AWS Integration
 - ✅ Glue Catalog for metadata
+- ✅ S3 Tables for native Iceberg storage (alternative to Glue)
 - ✅ S3 for data storage
 - ✅ Kinesis for event streaming
 - ✅ VPC connectivity for RDS

@@ -8,15 +8,17 @@ const app = new cdk.App();
 // Get context parameters
 const appType = app.node.tryGetContext('appType') || 'datastream';
 const enableMaintenance = app.node.tryGetContext('enableMaintenance') === 'true';
+const catalogType = app.node.tryGetContext('catalogType') || 'glue';
 
 new IcebergFlinkStack(app, 'IcebergFlinkStack', {
   appType: appType as 'datastream' | 'sql' | 'dynamic',
   enableMaintenance: enableMaintenance,
+  catalogType: catalogType as 'glue' | 's3tables',
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION || 'us-east-1',
   },
-  description: `Iceberg Flink Sample - ${appType} API${enableMaintenance ? ' with maintenance' : ''}`,
+  description: `Iceberg Flink Sample - ${appType} API${enableMaintenance ? ' with maintenance' : ''} (${catalogType} catalog)`,
 });
 
 app.synth();
