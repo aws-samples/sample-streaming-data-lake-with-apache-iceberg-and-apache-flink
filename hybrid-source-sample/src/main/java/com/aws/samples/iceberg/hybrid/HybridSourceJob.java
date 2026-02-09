@@ -1,35 +1,32 @@
 package com.aws.samples.iceberg.hybrid;
 
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
-import com.aws.samples.iceberg.model.OrderEvent;
-import com.aws.samples.iceberg.util.OrderEventDeserializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.aws.config.AWSConfigConstants;
+import org.apache.flink.connector.base.source.hybrid.HybridSource;
 import org.apache.flink.connector.kinesis.sink.KinesisStreamsSink;
 import org.apache.flink.connector.kinesis.source.KinesisStreamsSource;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
-import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.aws.glue.GlueCatalog;
-import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.flink.CatalogLoader;
+import org.apache.iceberg.flink.TableLoader;
 import org.apache.iceberg.flink.source.IcebergSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.amazon.s3tables.iceberg.S3TablesCatalog;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -37,25 +34,31 @@ import java.util.Properties;
 /**
  * Hybrid Source Job - Bootstrap from Iceberg historical data, then switch to real-time Kinesis.
  * 
- * This sample demonstrates the Flink HybridSource pattern:
+ * This sample demonstrates the Flink HybridSource pattern (FLIP-150):
  * 1. First, read all historical data from an Iceberg table (bounded source)
  * 2. Then, seamlessly switch to reading real-time events from Kinesis (unbounded source)
+ * 
+ * The HybridSource provides automatic switchover - when the Iceberg source finishes
+ * reading all historical data, it automatically transitions to the Kinesis source
+ * for real-time streaming. This appears as a single source in the Flink job graph.
+ * 
+ * Key implementation details:
+ * - Both sources produce RowData for unified processing
+ * - Iceberg source uses IcebergSource.forRowData()
+ * - Kinesis source uses JsonToRowDataDeserializer to convert JSON to RowData
+ * - HybridSource handles the automatic switchover
  * 
  * Use cases:
  * - Backfilling a new streaming application with historical data
  * - Recovering from extended downtime without data loss
  * - Migrating from batch to streaming processing
- * 
- * The HybridSource appears as a single source in the Flink job graph, making it
- * operationally simpler than managing multiple sources with custom switching logic.
+ * - Lambda architecture replacement (unified batch + streaming)
  * 
  * Configuration properties:
  * - iceberg.catalog.type: 'glue' or 's3tables'
  * - iceberg.database: Database/namespace name
  * - iceberg.table: Table name to read historical data from
  * - kinesis.source.stream.arn: Kinesis stream ARN for real-time data
- * - kinesis.source.starting.position: Where to start in Kinesis (LATEST, TRIM_HORIZON, AT_TIMESTAMP)
- * - kinesis.source.starting.timestamp: Timestamp for AT_TIMESTAMP position (ISO-8601)
  * - kinesis.sink.stream.arn: Kinesis stream ARN to write processed data
  */
 public class HybridSourceJob {
@@ -73,11 +76,11 @@ public class HybridSourceJob {
         
         // Create execution environment
         StreamExecutionEnvironment env = createExecutionEnvironment(flinkProps);
-        
+        env.disableOperatorChaining();
         // Build and execute pipeline
         buildPipeline(env, flinkProps);
         
-        env.execute("Hybrid Source: Iceberg Bootstrap + Kinesis Streaming");
+        env.execute("HybridSource: Iceberg Bootstrap -> Kinesis Streaming");
     }
     
     private static void buildPipeline(StreamExecutionEnvironment env, Properties props) {
@@ -88,97 +91,92 @@ public class HybridSourceJob {
         String sourceStreamArn = props.getProperty("kinesis.source.stream.arn");
         String sinkStreamArn = props.getProperty("kinesis.sink.stream.arn");
         
-        LOG.info("Building Hybrid Source pipeline: Iceberg({}.{}) -> Kinesis({})",
-                database, tableName, sourceStreamArn);
+        LOG.info("=== HybridSource Pipeline Configuration ===");
+        LOG.info("Phase 1 (Bounded):   Iceberg table {}.{}", database, tableName);
+        LOG.info("Phase 2 (Unbounded): Kinesis stream {}", sourceStreamArn);
+        LOG.info("Output:              Kinesis stream {}", sinkStreamArn);
+        LOG.info("============================================");
         
-        // Create catalog and get table
-        Catalog catalog = createCatalog(catalogType, props);
+        // Create catalog loader and table loader for Iceberg
+        CatalogLoader catalogLoader = createCatalogLoader(catalogType, props);
         TableIdentifier tableId = TableIdentifier.of(database, tableName);
-        Table table = catalog.loadTable(tableId);
+        TableLoader tableLoader = TableLoader.fromCatalog(catalogLoader, tableId);
+        
+        // Load table to get schema
+        tableLoader.open();
+        Table table = tableLoader.loadTable();
         Schema icebergSchema = table.schema();
+        LOG.info("Loaded Iceberg table schema with {} columns", icebergSchema.columns().size());
         
-        LOG.info("Loaded Iceberg table: {} with schema: {}", tableId, icebergSchema);
+        // Build the HybridSource with both sources producing RowData
+        HybridSource<RowData> hybridSource = buildHybridSource(tableLoader, icebergSchema, sourceStreamArn, region);
         
-        // Build Iceberg source (bounded - reads all historical data)
-        IcebergSource<RowData> icebergSource = IcebergSource.forRowData()
-                .table(table)
-                .streaming(false)  // Bounded - read all data then finish
-                .build();
-        
-        // Build Kinesis source (unbounded - real-time streaming)
-        KinesisStreamsSource<OrderEvent> kinesisSource = buildKinesisSource(sourceStreamArn, region, props);
-        
-        // Build HybridSource: Iceberg first, then Kinesis
-        // Note: HybridSource requires sources to produce the same type
-        // We'll process them separately and union the results
-        
-        // Option 1: Process Iceberg data
-        DataStream<String> icebergStream = env.fromSource(
-                icebergSource,
-                WatermarkStrategy.noWatermarks(),
-                "Iceberg Historical Source"
-        ).map(new RowDataToJsonMapper(icebergSchema))
-         .name("Iceberg to JSON");
-        
-        // Option 2: Process Kinesis data
-        DataStream<String> kinesisStream = env.fromSource(
-                kinesisSource,
-                WatermarkStrategy.<OrderEvent>forBoundedOutOfOrderness(Duration.ofSeconds(30))
-                        .withTimestampAssigner((event, timestamp) -> 
-                                event.getEventTime() != null ? 
-                                        event.getEventTime().toEpochMilli() : 
-                                        System.currentTimeMillis())
+        // Read from HybridSource
+        DataStream<RowData> hybridStream = env.fromSource(
+                hybridSource,
+                WatermarkStrategy.<RowData>forBoundedOutOfOrderness(Duration.ofSeconds(30))
                         .withIdleness(Duration.ofMinutes(1)),
-                "Kinesis Real-time Source"
-        ).map(event -> OBJECT_MAPPER.writeValueAsString(event))
-         .name("Kinesis to JSON");
+                "HybridSource: Iceberg -> Kinesis",
+                TypeInformation.of(RowData.class)
+        );
         
-        // Union both streams
-        DataStream<String> unifiedStream = icebergStream.union(kinesisStream);
-        
+        // Convert RowData to JSON for output
+        DataStream<String> jsonStream = hybridStream
+                .map(new RowDataToJsonMapper(icebergSchema))
+                .name("RowData to JSON");
+
         // Write to sink Kinesis stream
         KinesisStreamsSink<String> kinesisSink = buildKinesisSink(sinkStreamArn, region);
+        jsonStream.sinkTo(kinesisSink).name("Kinesis Sink");
         
-        unifiedStream.sinkTo(kinesisSink).name("Kinesis Sink");
-        
-        LOG.info("Pipeline built successfully - Iceberg bootstrap + Kinesis streaming");
+        LOG.info("Pipeline built successfully");
     }
     
     /**
-     * Alternative implementation using true HybridSource.
-     * This requires both sources to produce the same type (RowData).
+     * Builds a HybridSource that reads from Iceberg first (bounded), 
+     * then switches to Kinesis (unbounded).
      * 
-     * Note: This is more complex but provides seamless switchover semantics.
+     * Both sources produce RowData for unified processing.
      */
-    private static void buildTrueHybridPipeline(StreamExecutionEnvironment env, Properties props) {
-        // This would require:
-        // 1. A Kinesis source that produces RowData (custom deserializer)
-        // 2. Or converting OrderEvent to RowData
-        // 
-        // HybridSource<RowData> hybridSource = HybridSource
-        //     .<RowData>builder(icebergSource)
-        //     .addSource(kinesisRowDataSource)
-        //     .build();
-        //
-        // The switchover happens automatically when the first source finishes.
+    private static HybridSource<RowData> buildHybridSource(
+            TableLoader tableLoader,
+            Schema icebergSchema,
+            String kinesisStreamArn,
+            String region) {
         
-        LOG.info("True HybridSource implementation would go here");
+        // Source 1: Iceberg (bounded) - reads all historical data
+        IcebergSource<RowData> icebergSource = IcebergSource.forRowData()
+                .tableLoader(tableLoader)
+                .streaming(false)  // Bounded mode - completes after reading all data
+                .build();
+        
+        // Source 2: Kinesis (unbounded) - real-time streaming
+        // Uses custom deserializer to convert JSON to RowData matching Iceberg schema
+        KinesisStreamsSource<RowData> kinesisSource = KinesisStreamsSource.<RowData>builder()
+                .setStreamArn(kinesisStreamArn)
+                .setDeserializationSchema(new JsonToRowDataDeserializer(icebergSchema))
+                .setSourceConfig(buildKinesisSourceConfig(region))
+                .build();
+        
+        // Build HybridSource: Iceberg first, then Kinesis
+        // When Iceberg source completes (all historical data read),
+        // HybridSource automatically switches to Kinesis source
+        HybridSource<RowData> hybridSource = HybridSource
+                .builder(icebergSource)
+                .addSource(kinesisSource)
+                .build();
+        
+        LOG.info("Built HybridSource: IcebergSource (bounded) -> KinesisSource (unbounded)");
+        return hybridSource;
     }
     
-    private static KinesisStreamsSource<OrderEvent> buildKinesisSource(String streamArn, String region, Properties props) {
-        // Configure Kinesis source
-        Configuration sourceConfig = new Configuration();
-        sourceConfig.setString("aws.region", region);
-        sourceConfig.setString("flink.stream.initpos", "LATEST");
-        sourceConfig.setString("flink.shard.discovery.intervalmillis", "10000");
-        
-        LOG.info("Creating Kinesis source for stream: {} in region: {}", streamArn, region);
-        
-        return KinesisStreamsSource.<OrderEvent>builder()
-                .setStreamArn(streamArn)
-                .setDeserializationSchema(new OrderEventDeserializer())
-                .setSourceConfig(sourceConfig)
-                .build();
+    private static Configuration buildKinesisSourceConfig(String region) {
+        Configuration config = new Configuration();
+        config.setString("aws.region", region);
+        // Start from LATEST - we only want new events after Iceberg bootstrap completes
+        config.setString("flink.stream.initpos", "LATEST");
+        config.setString("flink.shard.discovery.intervalmillis", "10000");
+        return config;
     }
     
     private static KinesisStreamsSink<String> buildKinesisSink(String streamArn, String region) {
@@ -193,59 +191,61 @@ public class HybridSourceJob {
                 .build();
     }
     
-    private static Catalog createCatalog(String catalogType, Properties props) {
+    private static CatalogLoader createCatalogLoader(String catalogType, Properties props) {
         String region = props.getProperty("aws.region", "us-east-1");
         
         if ("s3tables".equalsIgnoreCase(catalogType)) {
-            return createS3TablesCatalog(props, region);
+            return createS3TablesCatalogLoader(props, region);
         } else {
-            return createGlueCatalog(props, region);
+            return createGlueCatalogLoader(props, region);
         }
     }
     
-    private static Catalog createGlueCatalog(Properties props, String region) {
+    private static CatalogLoader createGlueCatalogLoader(Properties props, String region) {
         String warehouse = props.getProperty("iceberg.warehouse");
         
         Map<String, String> catalogProps = new HashMap<>();
-        catalogProps.put(CatalogProperties.CATALOG_IMPL, GlueCatalog.class.getName());
-        catalogProps.put(CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.aws.s3.S3FileIO");
-        catalogProps.put(CatalogProperties.WAREHOUSE_LOCATION, warehouse);
+        catalogProps.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
+        catalogProps.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+        catalogProps.put("warehouse", warehouse);
         catalogProps.put("client.region", region);
+        catalogProps.put("glue.region", region);
+        catalogProps.put("s3.region", region);
         
-        GlueCatalog catalog = new GlueCatalog();
-        catalog.setConf(new org.apache.hadoop.conf.Configuration());
-        catalog.initialize("glue_catalog", catalogProps);
-        
-        LOG.info("Created Glue Catalog with warehouse: {}", warehouse);
-        return catalog;
+        return CatalogLoader.custom(
+                "glue_catalog",
+                catalogProps,
+                new org.apache.hadoop.conf.Configuration(),
+                "org.apache.iceberg.aws.glue.GlueCatalog"
+        );
     }
     
-    private static Catalog createS3TablesCatalog(Properties props, String region) {
+    private static CatalogLoader createS3TablesCatalogLoader(Properties props, String region) {
         String tableBucketArn = props.getProperty("s3tables.bucket.arn");
         
         Map<String, String> catalogProps = new HashMap<>();
-        catalogProps.put(CatalogProperties.CATALOG_IMPL, S3TablesCatalog.class.getName());
+        catalogProps.put("catalog-impl", "software.amazon.s3tables.iceberg.S3TablesCatalog");
         catalogProps.put("s3tables.catalog.client.region", region);
         catalogProps.put("warehouse", tableBucketArn);
+        catalogProps.put("client.region", region);
         
-        S3TablesCatalog catalog = new S3TablesCatalog();
-        catalog.initialize("s3tables_catalog", catalogProps);
-        
-        LOG.info("Created S3 Tables Catalog with bucket: {}", tableBucketArn);
-        return catalog;
+        return CatalogLoader.custom(
+                "s3tables_catalog",
+                catalogProps,
+                new org.apache.hadoop.conf.Configuration(),
+                "software.amazon.s3tables.iceberg.S3TablesCatalog"
+        );
     }
     
     private static StreamExecutionEnvironment createExecutionEnvironment(Properties props) {
         Configuration config = new Configuration();
         
-        // Local development settings
         if (isLocalDevelopment()) {
             config.setInteger("rest.port", 8086);
         }
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
         
-        // Configure checkpointing
         long checkpointInterval = Long.parseLong(props.getProperty("checkpoint.interval.ms", "60000"));
         env.enableCheckpointing(checkpointInterval);
         
@@ -255,7 +255,6 @@ public class HybridSourceJob {
     private static void validateConfiguration(Properties props) {
         String catalogType = props.getProperty("iceberg.catalog.type", "glue");
         
-        // Validate required properties based on catalog type
         if ("glue".equalsIgnoreCase(catalogType)) {
             requireProperty(props, "iceberg.warehouse", "ICEBERG_WAREHOUSE is required for Glue catalog");
         } else if ("s3tables".equalsIgnoreCase(catalogType)) {

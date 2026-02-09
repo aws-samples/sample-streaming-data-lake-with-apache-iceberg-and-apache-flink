@@ -32,6 +32,7 @@ import java.util.List;
  */
 public class RowDataToJsonMapper extends RichMapFunction<RowData, String> {
     
+    private static final long serialVersionUID = 1L;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE;
     private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ISO_INSTANT;
     
@@ -156,11 +157,41 @@ public class RowDataToJsonMapper extends RichMapFunction<RowData, String> {
                 break;
                 
             case LIST:
+                // Handle LIST type - convert to JSON array
+                org.apache.flink.table.data.ArrayData arrayData = rowData.getArray(pos);
+                if (arrayData != null) {
+                    Types.ListType listType = (Types.ListType) type;
+                    com.fasterxml.jackson.databind.node.ArrayNode arrayNode = objectMapper.createArrayNode();
+                    for (int j = 0; j < arrayData.size(); j++) {
+                        addArrayElementToJson(arrayNode, listType.elementType(), arrayData, j);
+                    }
+                    jsonNode.set(fieldName, arrayNode);
+                } else {
+                    jsonNode.putNull(fieldName);
+                }
+                break;
+                
             case MAP:
+                // Handle MAP type - convert to JSON object
+                org.apache.flink.table.data.MapData mapData = rowData.getMap(pos);
+                if (mapData != null) {
+                    Types.MapType mapType = (Types.MapType) type;
+                    ObjectNode mapNode = objectMapper.createObjectNode();
+                    org.apache.flink.table.data.ArrayData keyArray = mapData.keyArray();
+                    org.apache.flink.table.data.ArrayData valueArray = mapData.valueArray();
+                    for (int j = 0; j < mapData.size(); j++) {
+                        String key = keyArray.getString(j).toString();
+                        addMapValueToJson(mapNode, key, mapType.valueType(), valueArray, j);
+                    }
+                    jsonNode.set(fieldName, mapNode);
+                } else {
+                    jsonNode.putNull(fieldName);
+                }
+                break;
+                
             case STRUCT:
-                // For complex types, convert to string representation
-                // In production, you might want more sophisticated handling
-                jsonNode.put(fieldName, rowData.toString());
+                // For struct types, skip for now (would need recursive handling)
+                jsonNode.putNull(fieldName);
                 break;
                 
             default:
@@ -175,5 +206,67 @@ public class RowDataToJsonMapper extends RichMapFunction<RowData, String> {
         long micros = microseconds % 1_000_000L;
         
         return String.format("%02d:%02d:%02d.%06d", hours, minutes, seconds, micros);
+    }
+    
+    private void addArrayElementToJson(com.fasterxml.jackson.databind.node.ArrayNode arrayNode, Type elementType, 
+                                        org.apache.flink.table.data.ArrayData arrayData, int pos) {
+        if (arrayData.isNullAt(pos)) {
+            arrayNode.addNull();
+            return;
+        }
+        
+        switch (elementType.typeId()) {
+            case BOOLEAN:
+                arrayNode.add(arrayData.getBoolean(pos));
+                break;
+            case INTEGER:
+                arrayNode.add(arrayData.getInt(pos));
+                break;
+            case LONG:
+                arrayNode.add(arrayData.getLong(pos));
+                break;
+            case FLOAT:
+                arrayNode.add(arrayData.getFloat(pos));
+                break;
+            case DOUBLE:
+                arrayNode.add(arrayData.getDouble(pos));
+                break;
+            case STRING:
+                arrayNode.add(arrayData.getString(pos).toString());
+                break;
+            default:
+                arrayNode.add(arrayData.getString(pos).toString());
+        }
+    }
+    
+    private void addMapValueToJson(ObjectNode mapNode, String key, Type valueType,
+                                   org.apache.flink.table.data.ArrayData valueArray, int pos) {
+        if (valueArray.isNullAt(pos)) {
+            mapNode.putNull(key);
+            return;
+        }
+        
+        switch (valueType.typeId()) {
+            case BOOLEAN:
+                mapNode.put(key, valueArray.getBoolean(pos));
+                break;
+            case INTEGER:
+                mapNode.put(key, valueArray.getInt(pos));
+                break;
+            case LONG:
+                mapNode.put(key, valueArray.getLong(pos));
+                break;
+            case FLOAT:
+                mapNode.put(key, valueArray.getFloat(pos));
+                break;
+            case DOUBLE:
+                mapNode.put(key, valueArray.getDouble(pos));
+                break;
+            case STRING:
+                mapNode.put(key, valueArray.getString(pos).toString());
+                break;
+            default:
+                mapNode.put(key, valueArray.getString(pos).toString());
+        }
     }
 }

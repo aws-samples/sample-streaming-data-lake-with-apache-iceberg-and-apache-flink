@@ -371,23 +371,6 @@
                     </configuration>
                 </plugin>
 
-                <!-- OWASP Dependency Check - scans for known CVEs in dependencies -->
-                <plugin>
-                    <groupId>org.owasp</groupId>
-                    <artifactId>dependency-check-maven</artifactId>
-                    <version>9.0.9</version>
-                    <configuration>
-                        <failBuildOnCVSS>7</failBuildOnCVSS>
-                        <suppressionFiles>
-                            <suppressionFile>dependency-check-suppressions.xml</suppressionFile>
-                        </suppressionFiles>
-                        <formats>
-                            <format>HTML</format>
-                            <format>JSON</format>
-                        </formats>
-                    </configuration>
-                </plugin>
-
                 <!-- SpotBugs with FindSecBugs - static analysis for security bugs -->
                 <plugin>
                     <groupId>com.github.spotbugs</groupId>

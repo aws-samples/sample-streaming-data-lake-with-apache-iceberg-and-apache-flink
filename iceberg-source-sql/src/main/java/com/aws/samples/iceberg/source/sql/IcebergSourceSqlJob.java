@@ -34,7 +34,7 @@ import java.util.Properties;
  * - iceberg.database: Database/namespace name
  * - iceberg.table: Table name to read from
  * - iceberg.source.streaming: 'true' for streaming, 'false' for batch
- * - kinesis.sink.stream.name: Kinesis stream name to write to
+ * - kinesis.sink.stream.arn: Kinesis stream ARN to write to
  */
 public class IcebergSourceSqlJob {
     
@@ -48,8 +48,9 @@ public class IcebergSourceSqlJob {
         // Validate configuration
         validateConfiguration(flinkProps);
         
-        // Create execution environment
-        StreamExecutionEnvironment env = createExecutionEnvironment(flinkProps);
+        // Create execution environment with runtime mode set BEFORE creating TableEnvironment
+        boolean streaming = Boolean.parseBoolean(flinkProps.getProperty("iceberg.source.streaming", "true"));
+        StreamExecutionEnvironment env = createExecutionEnvironment(flinkProps, streaming);
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
         
         // Build and execute pipeline
@@ -62,32 +63,26 @@ public class IcebergSourceSqlJob {
         String tableName = props.getProperty("iceberg.table", "orders");
         String region = props.getProperty("aws.region", "us-east-1");
         boolean streaming = Boolean.parseBoolean(props.getProperty("iceberg.source.streaming", "true"));
-        String sinkStreamName = props.getProperty("kinesis.sink.stream.name");
+        String sinkStreamArn = props.getProperty("kinesis.sink.stream.arn");
         
         LOG.info("Building Iceberg Source SQL pipeline: catalog={}, database={}, table={}, streaming={}",
                 catalogType, database, tableName, streaming);
         
-        // Set streaming or batch mode
-        if (streaming) {
-            tableEnv.getConfig().set("execution.runtime-mode", "STREAMING");
-        } else {
-            tableEnv.getConfig().set("execution.runtime-mode", "BATCH");
-        }
+        // Create Kinesis sink table in default catalog FIRST (before switching to Iceberg catalog)
+        createKinesisSinkTable(tableEnv, sinkStreamArn, region);
         
-        // Create Iceberg catalog
+        // Create Iceberg catalog and switch to it
         createIcebergCatalog(tableEnv, catalogType, props);
         
-        // Create Kinesis sink table
-        createKinesisSinkTable(tableEnv, sinkStreamName, region);
-        
         // Build the query with SQL hints for streaming options
+        // Use fully qualified table name for Kinesis sink (default_catalog.default_database.kinesis_sink)
         String sourceQuery = buildSourceQuery(database, tableName, streaming, props);
         
         LOG.info("Executing query: {}", sourceQuery);
         
-        // Execute the pipeline
+        // Execute the pipeline - use fully qualified name for sink table
         tableEnv.executeSql(
-            "INSERT INTO kinesis_sink " + sourceQuery
+            "INSERT INTO default_catalog.default_database.kinesis_sink " + sourceQuery
         );
     }
     
@@ -128,8 +123,8 @@ public class IcebergSourceSqlJob {
         tableEnv.useCatalog("iceberg_catalog");
     }
     
-    private static void createKinesisSinkTable(StreamTableEnvironment tableEnv, String streamName, String region) {
-        // Create Kinesis sink table that accepts JSON
+    private static void createKinesisSinkTable(StreamTableEnvironment tableEnv, String streamArn, String region) {
+        // Create Kinesis sink table that accepts JSON - use stream.arn for sink connector
         tableEnv.executeSql(String.format(
             "CREATE TABLE kinesis_sink (" +
             "  event_id STRING," +
@@ -144,15 +139,15 @@ public class IcebergSourceSqlJob {
             "  status STRING" +
             ") WITH (" +
             "  'connector' = 'kinesis'," +
-            "  'stream' = '%s'," +
+            "  'stream.arn' = '%s'," +
             "  'aws.region' = '%s'," +
             "  'format' = 'json'," +
             "  'json.timestamp-format.standard' = 'ISO-8601'" +
             ")",
-            streamName, region
+            streamArn, region
         ));
         
-        LOG.info("Created Kinesis sink table for stream: {}", streamName);
+        LOG.info("Created Kinesis sink table for stream: {}", streamArn);
     }
     
     private static String buildSourceQuery(String database, String tableName, boolean streaming, Properties props) {
@@ -174,16 +169,12 @@ public class IcebergSourceSqlJob {
         // Add SQL hints for streaming configuration
         if (streaming) {
             String monitorInterval = props.getProperty("iceberg.source.monitor-interval", "60s");
-            String startingStrategy = props.getProperty("iceberg.source.starting-strategy", "INCREMENTAL_FROM_LATEST_SNAPSHOT");
-            
-            // Convert starting strategy to lowercase for SQL hint
-            String strategyHint = startingStrategy.toLowerCase().replace("_", "-");
             
             query.append(" /*+ OPTIONS(");
             query.append("'streaming' = 'true', ");
             query.append("'monitor-interval' = '").append(monitorInterval).append("'");
             
-            // Add starting strategy hint
+            // Add starting snapshot id if specified
             String startSnapshotId = props.getProperty("iceberg.source.start-snapshot-id");
             if (startSnapshotId != null && !startSnapshotId.isEmpty()) {
                 query.append(", 'start-snapshot-id' = '").append(startSnapshotId).append("'");
@@ -268,8 +259,15 @@ public class IcebergSourceSqlJob {
         )).print();
     }
     
-    private static StreamExecutionEnvironment createExecutionEnvironment(Properties props) {
+    private static StreamExecutionEnvironment createExecutionEnvironment(Properties props, boolean streaming) {
         Configuration config = new Configuration();
+        
+        // Set runtime mode BEFORE creating environment
+        if (streaming) {
+            config.setString("execution.runtime-mode", "STREAMING");
+        } else {
+            config.setString("execution.runtime-mode", "BATCH");
+        }
         
         // Local development settings
         if (isLocalDevelopment()) {
@@ -297,7 +295,7 @@ public class IcebergSourceSqlJob {
         
         requireProperty(props, "iceberg.database", "ICEBERG_DATABASE is required");
         requireProperty(props, "iceberg.table", "ICEBERG_TABLE is required");
-        requireProperty(props, "kinesis.sink.stream.name", "KINESIS_SINK_STREAM_NAME is required");
+        requireProperty(props, "kinesis.sink.stream.arn", "KINESIS_SINK_STREAM_ARN is required");
         
         // Warn about streaming limitations
         boolean streaming = Boolean.parseBoolean(props.getProperty("iceberg.source.streaming", "true"));

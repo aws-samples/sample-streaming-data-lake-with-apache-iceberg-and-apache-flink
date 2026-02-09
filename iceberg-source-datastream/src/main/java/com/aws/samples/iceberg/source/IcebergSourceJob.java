@@ -16,9 +16,7 @@ import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.aws.glue.GlueCatalog;
-import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.flink.source.IcebergSource;
 import org.apache.iceberg.flink.source.StreamingStartingStrategy;
 import org.slf4j.Logger;
@@ -31,7 +29,6 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Iceberg Source Job - Reads from Iceberg tables and writes to Kinesis.
@@ -70,7 +67,7 @@ public class IcebergSourceJob {
         
         // Create execution environment
         StreamExecutionEnvironment env = createExecutionEnvironment(flinkProps);
-        
+
         // Build and execute pipeline
         buildPipeline(env, flinkProps);
         
@@ -84,34 +81,45 @@ public class IcebergSourceJob {
         String region = props.getProperty("aws.region", "us-east-1");
         boolean streaming = Boolean.parseBoolean(props.getProperty("iceberg.source.streaming", "true"));
         
-        LOG.info("Building Iceberg Source pipeline: catalog={}, database={}, table={}, streaming={}",
-                catalogType, database, tableName, streaming);
+        LOG.info("=== Configuration ===");
+        LOG.info("Catalog Type: {}", catalogType);
+        LOG.info("AWS Region: {}", region);
+        LOG.info("Database: {}", database);
+        LOG.info("Table: {}", tableName);
+        LOG.info("Streaming: {}", streaming);
+        LOG.info("=====================");
         
-        // Create catalog and get table
-        Catalog catalog = createCatalog(catalogType, props);
+        // Create catalog loader and table loader
+        org.apache.iceberg.flink.CatalogLoader catalogLoader = createCatalogLoader(catalogType, props);
         TableIdentifier tableId = TableIdentifier.of(database, tableName);
-        Table table = catalog.loadTable(tableId);
+        org.apache.iceberg.flink.TableLoader tableLoader = org.apache.iceberg.flink.TableLoader.fromCatalog(catalogLoader, tableId);
+        
+        // Load table to get schema
+        tableLoader.open();
+        Table table = tableLoader.loadTable();
         Schema icebergSchema = table.schema();
         
         LOG.info("Loaded Iceberg table: {} with schema: {}", tableId, icebergSchema);
         
         // Build IcebergSource
-        IcebergSource<RowData> icebergSource = buildIcebergSource(table, props, streaming);
+        IcebergSource<RowData> icebergSource = buildIcebergSource(tableLoader, props, streaming);
         
         // Create source stream with watermarks
+        // Explicitly provide TypeInformation to avoid type erasure issues
         WatermarkStrategy<RowData> watermarkStrategy = buildWatermarkStrategy(props, icebergSchema);
         
         DataStream<RowData> sourceStream = env.fromSource(
                 icebergSource,
                 watermarkStrategy,
-                "Iceberg Source: " + tableName
+                "Iceberg Source: " + tableName,
+                org.apache.flink.api.common.typeinfo.TypeInformation.of(RowData.class)
         );
         
         // Convert RowData to JSON strings
         DataStream<String> jsonStream = sourceStream
                 .map(new RowDataToJsonMapper(icebergSchema))
                 .name("RowData to JSON");
-        
+
         // Write to Kinesis
         String sinkStreamArn = props.getProperty("kinesis.sink.stream.arn");
         KinesisStreamsSink<String> kinesisSink = buildKinesisSink(sinkStreamArn, region);
@@ -121,12 +129,12 @@ public class IcebergSourceJob {
         LOG.info("Pipeline built successfully");
     }
     
-    private static IcebergSource<RowData> buildIcebergSource(Table table, Properties props, boolean streaming) {
+    private static IcebergSource<RowData> buildIcebergSource(org.apache.iceberg.flink.TableLoader tableLoader, Properties props, boolean streaming) {
         String monitorIntervalStr = props.getProperty("iceberg.source.monitor-interval", "60s");
         Duration monitorInterval = parseDuration(monitorIntervalStr);
         
         IcebergSource.Builder<RowData> builder = IcebergSource.forRowData()
-                .table(table)
+                .tableLoader(tableLoader)
                 .streaming(streaming);
         
         if (streaming) {
@@ -184,46 +192,55 @@ public class IcebergSourceJob {
                 .build();
     }
     
-    private static Catalog createCatalog(String catalogType, Properties props) {
+    private static org.apache.iceberg.flink.CatalogLoader createCatalogLoader(String catalogType, Properties props) {
         String region = props.getProperty("aws.region", "us-east-1");
         
         if ("s3tables".equalsIgnoreCase(catalogType)) {
-            return createS3TablesCatalog(props, region);
+            return createS3TablesCatalogLoader(props, region);
         } else {
-            return createGlueCatalog(props, region);
+            return createGlueCatalogLoader(props, region);
         }
     }
     
-    private static Catalog createGlueCatalog(Properties props, String region) {
+    private static org.apache.iceberg.flink.CatalogLoader createGlueCatalogLoader(Properties props, String region) {
         String warehouse = props.getProperty("iceberg.warehouse");
+        
+        LOG.info("Creating Glue Catalog Loader with region: {}, warehouse: {}", region, warehouse);
         
         Map<String, String> catalogProps = new HashMap<>();
         catalogProps.put(CatalogProperties.CATALOG_IMPL, GlueCatalog.class.getName());
         catalogProps.put(CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.aws.s3.S3FileIO");
         catalogProps.put(CatalogProperties.WAREHOUSE_LOCATION, warehouse);
+        // Set region for both Glue client and S3 client
         catalogProps.put("client.region", region);
+        catalogProps.put("glue.region", region);
+        catalogProps.put("s3.region", region);
         
-        GlueCatalog catalog = new GlueCatalog();
-        catalog.setConf(new org.apache.hadoop.conf.Configuration());
-        catalog.initialize("glue_catalog", catalogProps);
-        
-        LOG.info("Created Glue Catalog with warehouse: {}", warehouse);
-        return catalog;
+        return org.apache.iceberg.flink.CatalogLoader.custom(
+                "glue_catalog",
+                catalogProps,
+                new org.apache.hadoop.conf.Configuration(),
+                GlueCatalog.class.getName()
+        );
     }
     
-    private static Catalog createS3TablesCatalog(Properties props, String region) {
+    private static org.apache.iceberg.flink.CatalogLoader createS3TablesCatalogLoader(Properties props, String region) {
         String tableBucketArn = props.getProperty("s3tables.bucket.arn");
+        
+        LOG.info("Creating S3 Tables Catalog Loader with region: {}, bucket: {}", region, tableBucketArn);
         
         Map<String, String> catalogProps = new HashMap<>();
         catalogProps.put(CatalogProperties.CATALOG_IMPL, S3TablesCatalog.class.getName());
         catalogProps.put("s3tables.catalog.client.region", region);
         catalogProps.put("warehouse", tableBucketArn);
+        catalogProps.put("client.region", region);
         
-        S3TablesCatalog catalog = new S3TablesCatalog();
-        catalog.initialize("s3tables_catalog", catalogProps);
-        
-        LOG.info("Created S3 Tables Catalog with bucket: {}", tableBucketArn);
-        return catalog;
+        return org.apache.iceberg.flink.CatalogLoader.custom(
+                "s3tables_catalog",
+                catalogProps,
+                new org.apache.hadoop.conf.Configuration(),
+                S3TablesCatalog.class.getName()
+        );
     }
     
     private static StreamingStartingStrategy parseStartingStrategy(String strategy) {

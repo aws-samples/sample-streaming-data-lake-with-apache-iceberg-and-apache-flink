@@ -14,7 +14,7 @@ const catalogType = app.node.tryGetContext('catalogType') || 'glue';
 const enableNag = app.node.tryGetContext('enableNag') !== 'false'; // Enable by default
 
 const stack = new IcebergFlinkStack(app, 'IcebergFlinkStack', {
-  appType: appType as 'datastream' | 'sql' | 'dynamic',
+  appType: appType as 'datastream' | 'sql' | 'dynamic' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid',
   enableMaintenance: enableMaintenance,
   catalogType: catalogType as 'glue' | 's3tables',
   env: {
