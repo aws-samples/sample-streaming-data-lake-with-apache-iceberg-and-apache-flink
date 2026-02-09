@@ -19,6 +19,9 @@
         <module>flink-sql-sample</module>
         <module>datastream-sample</module>
         <module>dynamic-sink-sample</module>
+        <module>iceberg-source-datastream</module>
+        <module>iceberg-source-sql</module>
+        <module>hybrid-source-sample</module>
     </modules>
 
     <properties>
@@ -365,6 +368,25 @@
                     <configuration>
                         <source>11</source>
                         <target>11</target>
+                    </configuration>
+                </plugin>
+
+                <!-- SpotBugs with FindSecBugs - static analysis for security bugs -->
+                <plugin>
+                    <groupId>com.github.spotbugs</groupId>
+                    <artifactId>spotbugs-maven-plugin</artifactId>
+                    <version>4.8.3.1</version>
+                    <configuration>
+                        <effort>Max</effort>
+                        <threshold>Medium</threshold>
+                        <failOnError>false</failOnError>
+                        <plugins>
+                            <plugin>
+                                <groupId>com.h3xstream.findsecbugs</groupId>
+                                <artifactId>findsecbugs-plugin</artifactId>
+                                <version>1.13.0</version>
+                            </plugin>
+                        </plugins>
                     </configuration>
                 </plugin>
 

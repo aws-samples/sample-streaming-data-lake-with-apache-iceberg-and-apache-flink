@@ -13,7 +13,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
-  appType: 'datastream' | 'sql' | 'dynamic';
+  appType: 'datastream' | 'sql' | 'dynamic' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid';
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';  // Default: 'glue'
 }
@@ -36,35 +36,84 @@ export class IcebergFlinkStack extends cdk.Stack {
         jarName: 'datastream-sample-1.0-SNAPSHOT.jar',
         mainClass: 'com.aws.samples.iceberg.datastream.DataStreamIcebergJob',
         description: 'DataStream API with Iceberg Sink and optional maintenance',
+        needsSourceStream: true,
+        needsSinkStream: false,
       },
       sql: {
         modulePath: '../flink-sql-sample',
         jarName: 'flink-sql-sample-1.0-SNAPSHOT.jar',
         mainClass: 'com.aws.samples.iceberg.sql.FlinkSqlIcebergJob',
         description: 'Flink SQL API with multi-table routing',
+        needsSourceStream: true,
+        needsSinkStream: false,
       },
       dynamic: {
         modulePath: '../dynamic-sink-sample',
         jarName: 'dynamic-sink-sample-1.0-SNAPSHOT.jar',
         mainClass: 'com.aws.samples.iceberg.dynamic.DynamicSinkJob',
         description: 'Dynamic Iceberg Sink with automatic table routing',
+        needsSourceStream: true,
+        needsSinkStream: false,
+      },
+      'iceberg-source': {
+        modulePath: '../iceberg-source-datastream',
+        jarName: 'iceberg-source-datastream-1.0-SNAPSHOT.jar',
+        mainClass: 'com.aws.samples.iceberg.source.IcebergSourceJob',
+        description: 'Read from Iceberg tables using DataStream API, write to Kinesis',
+        needsSourceStream: false,  // Reads from Iceberg, not Kinesis
+        needsSinkStream: true,     // Writes to Kinesis
+      },
+      'iceberg-source-sql': {
+        modulePath: '../iceberg-source-sql',
+        jarName: 'iceberg-source-sql-1.0-SNAPSHOT.jar',
+        mainClass: 'com.aws.samples.iceberg.source.sql.IcebergSourceSqlJob',
+        description: 'Read from Iceberg tables using SQL API, write to Kinesis',
+        needsSourceStream: false,  // Reads from Iceberg, not Kinesis
+        needsSinkStream: true,     // Writes to Kinesis
+      },
+      hybrid: {
+        modulePath: '../hybrid-source-sample',
+        jarName: 'hybrid-source-sample-1.0-SNAPSHOT.jar',
+        mainClass: 'com.aws.samples.iceberg.hybrid.HybridSourceJob',
+        description: 'Bootstrap from Iceberg then switch to Kinesis streaming',
+        needsSourceStream: true,   // Reads from Kinesis (after Iceberg bootstrap)
+        needsSinkStream: true,     // Writes to Kinesis
       },
     };
 
     const config = appConfig[appType];
 
-    // Kinesis stream for events (unique per app type)
-    const eventStream = new kinesis.Stream(this, 'EventStream', {
-      streamName: `iceberg-events-${appType}`,
-      shardCount: 2,
-      retentionPeriod: cdk.Duration.hours(24),
-      streamMode: kinesis.StreamMode.PROVISIONED,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
+    // Kinesis stream for events (source - unique per app type)
+    // Only create if the app needs a source stream
+    let eventStream: kinesis.Stream | undefined;
+    if (config.needsSourceStream) {
+      eventStream = new kinesis.Stream(this, 'EventStream', {
+        streamName: `iceberg-events-${appType}`,
+        shardCount: 2,
+        retentionPeriod: cdk.Duration.hours(24),
+        streamMode: kinesis.StreamMode.PROVISIONED,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+      
+      // Override CFN resource to ensure deletion on stack failure
+      const cfnStream = eventStream.node.defaultChild as kinesis.CfnStream;
+      cfnStream.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    }
     
-    // Override CFN resource to ensure deletion on stack failure
-    const cfnStream = eventStream.node.defaultChild as kinesis.CfnStream;
-    cfnStream.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    // Kinesis stream for output (sink - for Iceberg source apps)
+    let sinkStream: kinesis.Stream | undefined;
+    if (config.needsSinkStream) {
+      sinkStream = new kinesis.Stream(this, 'SinkStream', {
+        streamName: `iceberg-output-${appType}`,
+        shardCount: 2,
+        retentionPeriod: cdk.Duration.hours(24),
+        streamMode: kinesis.StreamMode.PROVISIONED,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+      
+      const cfnSinkStream = sinkStream.node.defaultChild as kinesis.CfnStream;
+      cfnSinkStream.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    }
 
     // Database/namespace name (unique per app type)
     const glueDatabaseName = `iceberg_${appType}`;
@@ -362,8 +411,45 @@ def handler(event, context):
       })
     );
 
-    // Grant permissions
-    eventStream.grantRead(flinkRole);
+    // Grant Kinesis permissions based on stream configuration
+    if (eventStream) {
+      eventStream.grantRead(flinkRole);
+      
+      // Kinesis permissions - grantRead() doesn't include DescribeStream
+      flinkRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'kinesis:DescribeStream',
+            'kinesis:DescribeStreamSummary',
+            'kinesis:DescribeStreamConsumer',
+            'kinesis:RegisterStreamConsumer',
+            'kinesis:DeregisterStreamConsumer',
+            'kinesis:ListShards',
+            'kinesis:SubscribeToShard',
+          ],
+          resources: [eventStream.streamArn],
+        })
+      );
+    }
+    
+    if (sinkStream) {
+      sinkStream.grantWrite(flinkRole);
+      
+      // Kinesis sink permissions
+      flinkRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            'kinesis:DescribeStream',
+            'kinesis:DescribeStreamSummary',
+            'kinesis:PutRecord',
+            'kinesis:PutRecords',
+          ],
+          resources: [sinkStream.streamArn],
+        })
+      );
+    }
     
     // S3 warehouse bucket permissions (only for Glue catalog)
     if (catalogType === 'glue' && warehouseBucket) {
@@ -385,23 +471,6 @@ def handler(event, context):
           `arn:aws:s3:::cdk-hnb659fds-assets-${this.account}-${this.region}`,
           `arn:aws:s3:::cdk-hnb659fds-assets-${this.account}-${this.region}/*`,
         ],
-      })
-    );
-
-    // Kinesis permissions - grantRead() doesn't include DescribeStream
-    flinkRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'kinesis:DescribeStream',
-          'kinesis:DescribeStreamSummary',
-          'kinesis:DescribeStreamConsumer',
-          'kinesis:RegisterStreamConsumer',
-          'kinesis:DeregisterStreamConsumer',
-          'kinesis:ListShards',
-          'kinesis:SubscribeToShard',
-        ],
-        resources: [eventStream.streamArn],
       })
     );
 
@@ -552,7 +621,9 @@ def handler(event, context):
 
     // Build runtime properties based on app type and maintenance setting
     const runtimeProperties = this.buildRuntimeProperties(appType, enableMaintenance, catalogType, {
-      kinesisStreamArn: eventStream.streamArn,
+      kinesisSourceStreamArn: eventStream?.streamArn,
+      kinesisSinkStreamArn: sinkStream?.streamArn,
+      kinesisSinkStreamName: sinkStream?.streamName,
       warehousePath: warehouseBucket ? `s3://${warehouseBucket.bucketName}/warehouse` : '',
       region: this.region,
       dbEndpoint: database?.dbInstanceEndpointAddress,
@@ -622,7 +693,12 @@ def handler(event, context):
     // Ensure Flink app is created after JAR is uploaded and role is ready
     flinkApp.node.addDependency(flinkJarAsset);
     flinkApp.node.addDependency(flinkRole);
-    flinkApp.node.addDependency(eventStream);
+    if (eventStream) {
+      flinkApp.node.addDependency(eventStream);
+    }
+    if (sinkStream) {
+      flinkApp.node.addDependency(sinkStream);
+    }
     if (warehouseBucket) {
       flinkApp.node.addDependency(warehouseBucket);
     }
@@ -647,10 +723,24 @@ def handler(event, context):
       description: 'Flink application name',
     });
 
-    new cdk.CfnOutput(this, 'KinesisStreamName', {
-      value: eventStream.streamName,
-      description: 'Kinesis stream name for events',
-    });
+    if (eventStream) {
+      new cdk.CfnOutput(this, 'KinesisSourceStreamName', {
+        value: eventStream.streamName,
+        description: 'Kinesis stream name for source events',
+      });
+    }
+    
+    if (sinkStream) {
+      new cdk.CfnOutput(this, 'KinesisSinkStreamName', {
+        value: sinkStream.streamName,
+        description: 'Kinesis stream name for sink output',
+      });
+      
+      new cdk.CfnOutput(this, 'KinesisSinkStreamArn', {
+        value: sinkStream.streamArn,
+        description: 'Kinesis stream ARN for sink output',
+      });
+    }
 
     if (warehouseBucket) {
       new cdk.CfnOutput(this, 'WarehouseBucket', {
@@ -692,7 +782,9 @@ def handler(event, context):
     enableMaintenance: boolean,
     catalogType: string,
     resources: {
-      kinesisStreamArn: string;
+      kinesisSourceStreamArn?: string;
+      kinesisSinkStreamArn?: string;
+      kinesisSinkStreamName?: string;
       warehousePath: string;
       region: string;
       dbEndpoint?: string;
@@ -722,10 +814,12 @@ def handler(event, context):
     if (appType === 'datastream') {
       const props = {
         ...baseProps,
-        'kinesis.stream.arn': resources.kinesisStreamArn,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'iceberg.table': 'orders',
         'enable.maintenance': enableMaintenance.toString(),
+        'write.mode': 'upsert',  // Default to upsert for backward compatibility
+        'primary.key.columns': 'event_id,event_date,region',
       };
 
       if (enableMaintenance && resources.dbEndpoint && resources.dbSecretArn) {
@@ -743,6 +837,8 @@ def handler(event, context):
         'kinesis.stream.name': `iceberg-events-${appType}`,
         'glue.database': `iceberg_${appType}`,  // SQL job expects this property name
         'table.prefix': 'sql_',
+        'write.mode': 'append',  // Default to append for SQL (simpler)
+        'primary.key.columns': 'event_id,event_date,region',
       };
       
       // Add warehouse path only for Glue catalog
@@ -751,12 +847,41 @@ def handler(event, context):
       }
       
       return sqlProps;
+    } else if (appType === 'iceberg-source') {
+      // Iceberg Source (DataStream API) - reads from Iceberg, writes to Kinesis
+      return {
+        ...baseProps,
+        'iceberg.table': 'orders',  // Default table to read from
+        'iceberg.source.streaming': 'true',
+        'iceberg.source.starting-strategy': 'INCREMENTAL_FROM_LATEST_SNAPSHOT',
+        'iceberg.source.monitor-interval': '60s',
+        'kinesis.sink.stream.arn': resources.kinesisSinkStreamArn!,
+      };
+    } else if (appType === 'iceberg-source-sql') {
+      // Iceberg Source SQL - reads from Iceberg using SQL, writes to Kinesis
+      return {
+        ...baseProps,
+        'iceberg.table': 'orders',  // Default table to read from
+        'iceberg.source.streaming': 'true',
+        'iceberg.source.monitor-interval': '60s',
+        'kinesis.sink.stream.name': resources.kinesisSinkStreamName!,
+      };
+    } else if (appType === 'hybrid') {
+      // Hybrid Source - bootstrap from Iceberg, then switch to Kinesis streaming
+      return {
+        ...baseProps,
+        'iceberg.table': 'orders',  // Table to bootstrap from
+        'kinesis.source.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.sink.stream.arn': resources.kinesisSinkStreamArn!,
+      };
     } else {
       // dynamic
       return {
         ...baseProps,
-        'kinesis.stream.arn': resources.kinesisStreamArn,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
+        'write.mode': 'append',  // Default to append for dynamic sink
+        'primary.key.columns': 'event_id,event_date,region',
       };
     }
   }

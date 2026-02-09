@@ -31,6 +31,8 @@ The job can be configured via environment variables or command-line arguments:
 | `iceberg.table` | `ICEBERG_TABLE` | `orders` | Iceberg table name |
 | `iceberg.warehouse` | `ICEBERG_WAREHOUSE` | - | S3 path for Iceberg warehouse |
 | `iceberg.branch` | `ICEBERG_BRANCH` | - | Optional: Branch name for staging writes |
+| `write.mode` | `WRITE_MODE` | `upsert` | Write mode: `append` or `upsert` |
+| `primary.key.columns` | `PRIMARY_KEY_COLUMNS` | `event_id,event_date,region` | Comma-separated primary key columns for upsert mode |
 | `aws.region` | `AWS_REGION` | `us-east-1` | AWS region for Glue and S3 |
 | `checkpoint.interval.ms` | `CHECKPOINT_INTERVAL_MS` | `60000` | Checkpoint interval in milliseconds |
 
@@ -42,15 +44,34 @@ The job can be configured via environment variables or command-line arguments:
 2. Create a Kinesis stream
 3. Create a Glue database
 4. Create an S3 bucket for the Iceberg warehouse
+5. Update `src/main/resources/flink-application-properties-dev.json` with your configuration
 
 ### Run the Job
 
 ```bash
-export KINESIS_STREAM_ARN="arn:aws:kinesis:us-east-1:123456789:stream/events"
-export ICEBERG_WAREHOUSE="s3://my-bucket/warehouse"
-
 mvn clean package
 mvn exec:java -Dexec.mainClass="com.aws.samples.iceberg.datastream.DataStreamIcebergJob"
+```
+
+Or use the provided IntelliJ run configuration: `.run/DataStreamIcebergJob.run.xml`
+
+### Local Configuration
+
+Edit `src/main/resources/flink-application-properties-dev.json`:
+
+```json
+{
+  "PropertyGroupId": "FlinkApplicationProperties",
+  "PropertyMap": {
+    "kinesis.stream.arn": "arn:aws:kinesis:us-east-1:123456789:stream/events",
+    "kinesis.region": "us-east-1",
+    "iceberg.warehouse": "s3://my-bucket/warehouse",
+    "iceberg.database": "iceberg_samples",
+    "iceberg.table": "orders",
+    "write.mode": "upsert",
+    "primary.key.columns": "event_id,event_date,region"
+  }
+}
 ```
 
 ## Branch Writes for Staging
@@ -144,9 +165,37 @@ table.manageSnapshots()
 └─────────────────────────┘
 ```
 
+## Upsert vs Append Mode
+
+The job supports two write modes, configurable via `WRITE_MODE`:
+
+### Upsert Mode (Default)
+
+When `WRITE_MODE=upsert`:
+- Deduplicates records based on `PRIMARY_KEY_COLUMNS`
+- Uses merge-on-read with delete vectors (v2 format)
+- Partition columns must be included in primary key when using HASH distribution
+- Best for: Event sourcing, CDC, or when duplicate events may arrive
+
+```bash
+export WRITE_MODE="upsert"
+export PRIMARY_KEY_COLUMNS="event_id,event_date,region"
+```
+
+### Append Mode
+
+When `WRITE_MODE=append`:
+- No deduplication - all records are appended
+- Better write performance (no equality checks)
+- Best for: Log data, metrics, or when duplicates are acceptable
+
+```bash
+export WRITE_MODE="append"
+```
+
 ## Upsert Semantics
 
-The job uses upsert mode with `event_id` as the primary key. When multiple events with the same `event_id` are received:
+When using upsert mode with `event_id` as the primary key:
 
 1. The most recent event (by `event_time`) is kept
 2. Older events are marked as deleted using delete vectors (v3 format)

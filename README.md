@@ -114,6 +114,54 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 - Handles ANY JSON structure without code changes
 - Configurable routing field and table naming
 
+### 4. Iceberg Source - DataStream (`iceberg-source-datastream`)
+**Best for: Reading Iceberg tables and streaming to Kinesis**
+
+- Uses FLIP-27 IcebergSource for streaming/batch reads
+- Multiple starting strategies (latest, earliest, snapshot-based)
+- Watermark generation from Iceberg column statistics
+- Writes to Kinesis Data Stream as JSON
+
+**Key Features:**
+- Streaming reads from append-only Iceberg tables
+- Configurable monitor interval for new snapshots
+- Support for both Glue Catalog and S3 Tables
+- JSON serialization for downstream consumers
+
+**Important:** Streaming reads only work for APPEND-ONLY tables. Tables with upserts (equality deletes) are NOT supported for streaming.
+
+### 5. Iceberg Source - SQL (`iceberg-source-sql`)
+**Best for: SQL-first approach to reading Iceberg tables**
+
+- Flink SQL for reading Iceberg tables
+- SQL hints for streaming/batch configuration
+- Branch and tag reading support
+- Metadata table queries ($snapshots, $history, $files)
+- Writes to Kinesis using SQL connector
+
+**Key Features:**
+- Declarative SQL-based pipeline
+- Time travel queries (snapshot-id, as-of-timestamp)
+- Branch and tag support for data versioning
+- Easy integration with existing SQL workflows
+
+### 6. Hybrid Source (`hybrid-source-sample`)
+**Best for: Backfilling and migration scenarios**
+
+- Bootstrap from Iceberg historical data (bounded)
+- Seamlessly switch to Kinesis real-time streaming (unbounded)
+- Single unified pipeline for both historical and real-time data
+
+**Use Cases:**
+- Backfilling a new streaming application with historical data
+- Recovering from extended downtime without data loss
+- Migrating from batch to streaming processing
+
+**Key Features:**
+- Flink HybridSource pattern
+- Automatic switchover when historical read completes
+- Unified output to Kinesis sink
+
 ## Prerequisites
 ### For Local Development
 - Java 11 or later
@@ -356,6 +404,47 @@ cdk deploy -c appType=sql -c catalogType=s3tables
 
 **Cost:** ~$5-6/day
 
+#### Option H: Iceberg Source (Read from Iceberg, Write to Kinesis)
+```bash
+cdk deploy -c appType=iceberg-source
+```
+
+**Deploys:**
+- S3 warehouse bucket and Glue database (or S3 Tables)
+- Kinesis Data Stream for output
+- Managed Flink application reading from Iceberg
+
+**Note:** Requires an existing Iceberg table with data. Streaming reads only work for append-only tables.
+
+**Cost:** ~$5-6/day
+
+#### Option I: Iceberg Source SQL
+```bash
+cdk deploy -c appType=iceberg-source-sql
+```
+
+**Deploys:**
+- S3 warehouse bucket and Glue database (or S3 Tables)
+- Kinesis Data Stream for output
+- Managed Flink application with SQL-based Iceberg reading
+
+**Cost:** ~$5-6/day
+
+#### Option J: Hybrid Source (Bootstrap + Streaming)
+```bash
+cdk deploy -c appType=hybrid
+```
+
+**Deploys:**
+- S3 warehouse bucket and Glue database (or S3 Tables)
+- Kinesis Data Stream for source (after bootstrap)
+- Kinesis Data Stream for sink output
+- Managed Flink application with hybrid source pattern
+
+**Use Case:** Start by reading all historical data from Iceberg, then seamlessly switch to real-time Kinesis streaming.
+
+**Cost:** ~$6-7/day (two Kinesis streams)
+
 ### Step 3: Note the Outputs
 CDK will output important values:
 ```
@@ -541,6 +630,12 @@ iceberg-flink-samples/
 │   └── sql/                       # DDL statements
 ├── dynamic-sink-sample/           # Dynamic Iceberg Sink (Schema-Agnostic)
 │   └── src/main/java/             # Dynamic routing logic
+├── iceberg-source-datastream/     # Iceberg Source (DataStream API)
+│   └── src/main/java/             # FLIP-27 IcebergSource to Kinesis
+├── iceberg-source-sql/            # Iceberg Source (SQL API)
+│   └── src/main/java/             # SQL-based Iceberg reading
+├── hybrid-source-sample/          # Hybrid Source (Iceberg + Kinesis)
+│   └── src/main/java/             # Bootstrap from Iceberg, stream from Kinesis
 ├── data-generator/                # Test data generator
 │   └── src/main/java/             # Event generation
 ├── shared-common/                 # Shared utilities

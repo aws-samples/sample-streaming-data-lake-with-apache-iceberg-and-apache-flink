@@ -100,11 +100,18 @@ public class FlinkSqlIcebergJob {
         String catalogType = props.getProperty("iceberg.catalog.type", "glue");
         String s3TableBucketArn = props.getProperty("s3tables.bucket.arn", "");
         boolean enableMaintenance = Boolean.parseBoolean(props.getProperty("enable.maintenance", "false"));
+        String writeMode = props.getProperty("write.mode", "append");  // "append" or "upsert"
+        String primaryKeyColumns = props.getProperty("primary.key.columns", "event_id,event_date,region");
+        boolean isUpsertMode = "upsert".equalsIgnoreCase(writeMode);
         
         LOG.info("Starting Flink SQL Iceberg Job");
         LOG.info("Kinesis Stream: {}", kinesisStreamName);
         LOG.info("AWS Region: {}", awsRegion);
         LOG.info("Catalog Type: {}", catalogType);
+        LOG.info("Write Mode: {}", writeMode);
+        if (isUpsertMode) {
+            LOG.info("Primary Key Columns: {}", primaryKeyColumns);
+        }
         if ("s3tables".equals(catalogType)) {
             LOG.info("S3 Table Bucket ARN: {}", s3TableBucketArn);
         } else {
@@ -235,9 +242,9 @@ public class FlinkSqlIcebergJob {
         LOG.info("Using database: {}", glueDatabase);
         
         // Create Iceberg tables for each event type with v2 format and delete vectors
-        createOrderEventsTable(tableEnv, glueDatabase, tablePrefix);
-        createUserEventsTable(tableEnv, glueDatabase, tablePrefix);
-        createClickEventsTable(tableEnv, glueDatabase, tablePrefix);
+        createOrderEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode);
+        createUserEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode);
+        createClickEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode);
         
         // Start streaming writes from Kinesis to Iceberg tables using StatementSet
         // This ensures we read from Kinesis only once and route to 3 tables
@@ -322,11 +329,20 @@ public class FlinkSqlIcebergJob {
     }
     
     /**
-     * Create the orders Iceberg table with v3 format and delete vectors.
+     * Create the orders Iceberg table with v2 format.
      * Partitioned by event_date and region for efficient querying.
-     * Configured with primary key for UPSERT operations.
+     * When upsert mode is enabled, adds PRIMARY KEY constraint for deduplication.
      */
-    private static void createOrderEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix) {
+    private static void createOrderEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
+        String primaryKeyClause = isUpsertMode ? 
+            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+        
+        String upsertProperties = isUpsertMode ?
+            "    'write.upsert.enabled' = 'true',\n" +
+            "    'write.delete.mode' = 'merge-on-read',\n" +
+            "    'write.update.mode' = 'merge-on-read',\n" +
+            "    'write.merge.mode' = 'merge-on-read',\n" : "";
+        
         String createTableSql = "CREATE TABLE IF NOT EXISTS " + database + "." + tablePrefix + "orders (\n" +
             "    event_id STRING,\n" +
             "    event_time TIMESTAMP(6),\n" +
@@ -338,26 +354,37 @@ public class FlinkSqlIcebergJob {
             "    amount DECIMAL(18, 2),\n" +
             "    currency STRING,\n" +
             "    status STRING,\n" +
-            "    metadata MAP<STRING, STRING>\n" +
+            "    metadata MAP<STRING, STRING>,\n" +
+            primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
             "    'format-version' = '2',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
+            upsertProperties +
             "    'write.target-file-size-bytes' = '134217728'\n" +
             ")";
         
-        LOG.info("Creating {}orders table", tablePrefix);
+        LOG.info("Creating {}orders table (upsert mode: {})", tablePrefix, isUpsertMode);
         tableEnv.executeSql(createTableSql);
         LOG.info("{}orders table created successfully", tablePrefix);
     }
     
     /**
-     * Create the users Iceberg table with v3 format and delete vectors.
+     * Create the users Iceberg table with v2 format.
      * Partitioned by event_date and region for efficient querying.
-     * Configured with primary key for UPSERT operations.
+     * When upsert mode is enabled, adds PRIMARY KEY constraint for deduplication.
      */
-    private static void createUserEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix) {
+    private static void createUserEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
+        String primaryKeyClause = isUpsertMode ? 
+            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+        
+        String upsertProperties = isUpsertMode ?
+            "    'write.upsert.enabled' = 'true',\n" +
+            "    'write.delete.mode' = 'merge-on-read',\n" +
+            "    'write.update.mode' = 'merge-on-read',\n" +
+            "    'write.merge.mode' = 'merge-on-read',\n" : "";
+        
         String createTableSql = "CREATE TABLE IF NOT EXISTS " + database + "." + tablePrefix + "users (\n" +
             "    event_id STRING,\n" +
             "    event_time TIMESTAMP(6),\n" +
@@ -369,26 +396,37 @@ public class FlinkSqlIcebergJob {
             "    device_type STRING,\n" +
             "    ip_address STRING,\n" +
             "    user_agent STRING,\n" +
-            "    metadata MAP<STRING, STRING>\n" +
+            "    metadata MAP<STRING, STRING>,\n" +
+            primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
             "    'format-version' = '2',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
+            upsertProperties +
             "    'write.target-file-size-bytes' = '134217728'\n" +
             ")";
         
-        LOG.info("Creating {}users table", tablePrefix);
+        LOG.info("Creating {}users table (upsert mode: {})", tablePrefix, isUpsertMode);
         tableEnv.executeSql(createTableSql);
         LOG.info("{}users table created successfully", tablePrefix);
     }
     
     /**
-     * Create the clicks Iceberg table with v3 format and delete vectors.
+     * Create the clicks Iceberg table with v2 format.
      * Partitioned by event_date and region for efficient querying.
-     * Configured with primary key for UPSERT operations.
+     * When upsert mode is enabled, adds PRIMARY KEY constraint for deduplication.
      */
-    private static void createClickEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix) {
+    private static void createClickEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
+        String primaryKeyClause = isUpsertMode ? 
+            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+        
+        String upsertProperties = isUpsertMode ?
+            "    'write.upsert.enabled' = 'true',\n" +
+            "    'write.delete.mode' = 'merge-on-read',\n" +
+            "    'write.update.mode' = 'merge-on-read',\n" +
+            "    'write.merge.mode' = 'merge-on-read',\n" : "";
+        
         String createTableSql = "CREATE TABLE IF NOT EXISTS " + database + "." + tablePrefix + "clicks (\n" +
             "    event_id STRING,\n" +
             "    event_time TIMESTAMP(6),\n" +
@@ -400,16 +438,18 @@ public class FlinkSqlIcebergJob {
             "    referrer STRING,\n" +
             "    scroll_depth INT,\n" +
             "    time_on_page_seconds BIGINT,\n" +
-            "    metadata MAP<STRING, STRING>\n" +
+            "    metadata MAP<STRING, STRING>,\n" +
+            primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
             "    'format-version' = '2',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
+            upsertProperties +
             "    'write.target-file-size-bytes' = '134217728'\n" +
             ")";
         
-        LOG.info("Creating {}clicks table", tablePrefix);
+        LOG.info("Creating {}clicks table (upsert mode: {})", tablePrefix, isUpsertMode);
         tableEnv.executeSql(createTableSql);
         LOG.info("{}clicks table created successfully", tablePrefix);
     }

@@ -60,6 +60,8 @@ public class DynamicSinkJob {
     private static final String ROUTING_FIELD = "routing.field";
     private static final String ROUTING_TABLE_SUFFIX = "routing.table.suffix";
     private static final String PARTITION_CANDIDATES = "partition.candidates";
+    private static final String WRITE_MODE = "write.mode";  // "append" or "upsert" (default: append)
+    private static final String PRIMARY_KEY_COLUMNS = "primary.key.columns";  // Comma-separated list for upsert mode
     
     private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE = "flink-application-properties-dev.json";
 
@@ -272,11 +274,21 @@ public class DynamicSinkJob {
         String partitionCandidatesStr = config.getOrDefault(PARTITION_CANDIDATES, "event_date,region,date");
         List<String> partitionCandidates = Arrays.asList(partitionCandidatesStr.split(","));
         
+        // Write mode configuration
+        String writeMode = config.getOrDefault(WRITE_MODE, "append");
+        boolean isUpsertMode = "upsert".equalsIgnoreCase(writeMode);
+        String primaryKeyColumnsStr = config.getOrDefault(PRIMARY_KEY_COLUMNS, "event_id,event_date,region");
+        List<String> primaryKeyColumns = Arrays.asList(primaryKeyColumnsStr.split(","));
+        
         LOG.info("Configuring Schema-Agnostic Dynamic Iceberg Sink:");
         LOG.info("  Database: {}", database);
         LOG.info("  Routing Field: {}", routingField);
         LOG.info("  Table Suffix: {}", tableSuffix);
         LOG.info("  Partition Candidates: {}", partitionCandidates);
+        LOG.info("  Write Mode: {}", writeMode);
+        if (isUpsertMode) {
+            LOG.info("  Primary Key Columns: {}", primaryKeyColumns);
+        }
         LOG.info("  Cache Max Size: {}", cacheMaxSize);
         LOG.info("  Cache Refresh: {} ms", cacheRefreshMs);
         
@@ -289,7 +301,7 @@ public class DynamicSinkJob {
             partitionCandidates
         );
         
-        DynamicIcebergSink.forInput(events)
+        var sinkBuilder = DynamicIcebergSink.forInput(events)
             .generator(generator)
             .catalogLoader(catalogLoader)
             .immediateTableUpdate(true)
@@ -297,12 +309,20 @@ public class DynamicSinkJob {
             .cacheRefreshMs(cacheRefreshMs)
             .set("write.format.default", "parquet")
             .set("format-version", "3")
-            .set("write.delete.mode", "merge-on-read")
-            .set("write.update.mode", "merge-on-read")
-            .set("write.merge.mode", "merge-on-read")
             .set("write.target-file-size-bytes", "134217728")
-            .set("write.parquet.compression-codec", "snappy")
-            .append();
+            .set("write.parquet.compression-codec", "snappy");
+        
+        // Configure upsert mode if enabled
+        if (isUpsertMode) {
+            sinkBuilder
+                .set("write.upsert.enabled", "true")
+                .set("write.delete.mode", "merge-on-read")
+                .set("write.update.mode", "merge-on-read")
+                .set("write.merge.mode", "merge-on-read");
+            LOG.info("Upsert mode enabled with merge-on-read");
+        }
+        
+        sinkBuilder.append();
         
         LOG.info("Schema-Agnostic Dynamic Iceberg Sink configured successfully");
     }

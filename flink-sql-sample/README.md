@@ -39,7 +39,20 @@ export KINESIS_STREAM_NAME=iceberg-events
 export AWS_REGION=us-east-1
 export S3_WAREHOUSE_PATH=s3://your-bucket/warehouse
 export GLUE_DATABASE=iceberg_samples
+export WRITE_MODE=append  # or "upsert" for deduplication
+export PRIMARY_KEY_COLUMNS=event_id,event_date,region  # for upsert mode
 ```
+
+### Write Mode Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `write.mode` | `append` | Write mode: `append` (no deduplication) or `upsert` (deduplicate by primary key) |
+| `primary.key.columns` | `event_id,event_date,region` | Comma-separated primary key columns for upsert mode |
+
+**Append Mode** (default): All records are appended without deduplication. Best for log data or when duplicates are acceptable.
+
+**Upsert Mode**: Deduplicates records based on primary key columns. Tables are created with `PRIMARY KEY ... NOT ENFORCED` constraint and merge-on-read settings.
 
 ## Building
 
@@ -68,6 +81,22 @@ Or use the provided IntelliJ run configuration: `.run/FlinkSqlIcebergJob.run.xml
 4. Start the application
 
 ## Table Schemas
+
+Tables are created dynamically based on the `write.mode` configuration:
+
+### Append Mode (Default)
+Tables are created without PRIMARY KEY constraint:
+
+```sql
+CREATE TABLE orders (
+    event_id STRING,
+    event_time TIMESTAMP(6),
+    ...
+) PARTITIONED BY (event_date, region);
+```
+
+### Upsert Mode
+Tables are created with PRIMARY KEY constraint and merge-on-read settings:
 
 ### Orders Table
 ```sql
@@ -132,8 +161,8 @@ The job automatically routes events to the appropriate table based on `event_typ
 
 ## UPSERT Behavior
 
-All tables are configured with:
-- Primary key on `event_id`
+When `write.mode=upsert`, all tables are configured with:
+- Primary key on `event_id, event_date, region`
 - `write.upsert.enabled = 'true'`
 - Merge-on-read delete mode
 

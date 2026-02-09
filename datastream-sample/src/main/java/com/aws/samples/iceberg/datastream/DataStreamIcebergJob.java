@@ -66,6 +66,8 @@ public class DataStreamIcebergJob {
     private static final String RDS_JDBC_URL = "rds.jdbc.url";
     private static final String RDS_USER = "rds.user";
     private static final String RDS_PASSWORD = "rds.password";
+    private static final String WRITE_MODE = "write.mode";  // "append" or "upsert" (default: upsert)
+    private static final String PRIMARY_KEY_COLUMNS = "primary.key.columns";  // Comma-separated list for upsert mode
     private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE = "flink-application-properties-dev.json";
     
     /**
@@ -77,29 +79,36 @@ public class DataStreamIcebergJob {
     
     /**
      * Load application properties from Amazon Managed Service for Apache Flink runtime
-     * or from environment variables when running locally.
+     * or from local properties file when running locally.
      */
     private static Map<String, String> loadApplicationProperties(StreamExecutionEnvironment env) throws Exception {
         Map<String, String> config = new HashMap<>();
         
         if (isLocal(env)) {
-            LOG.info("Loading configuration from environment variables (local mode)");
-            // Load from environment variables for local development
-            config.put(KINESIS_STREAM_ARN, getEnvOrDefault("KINESIS_STREAM_ARN", ""));
-            config.put(KINESIS_REGION, getEnvOrDefault("KINESIS_REGION", "us-east-1"));
-            config.put(ICEBERG_CATALOG_NAME, getEnvOrDefault("ICEBERG_CATALOG_NAME", "glue_catalog"));
-            config.put(ICEBERG_CATALOG_TYPE, getEnvOrDefault("ICEBERG_CATALOG_TYPE", "glue"));
-            config.put(ICEBERG_DATABASE, getEnvOrDefault("ICEBERG_DATABASE", "iceberg_samples"));
-            config.put(ICEBERG_TABLE, getEnvOrDefault("ICEBERG_TABLE", "orders"));
-            config.put(ICEBERG_WAREHOUSE, getEnvOrDefault("ICEBERG_WAREHOUSE", ""));
-            config.put(S3TABLES_BUCKET_ARN, getEnvOrDefault("S3TABLES_BUCKET_ARN", ""));
-            config.put(AWS_REGION, getEnvOrDefault("AWS_REGION", "us-east-1"));
-            config.put(CHECKPOINT_INTERVAL, getEnvOrDefault("CHECKPOINT_INTERVAL_MS", "60000"));
-            config.put(ICEBERG_BRANCH, getEnvOrDefault("ICEBERG_BRANCH", ""));
-            config.put(ENABLE_MAINTENANCE, getEnvOrDefault("ENABLE_MAINTENANCE", "false"));
-            config.put(RDS_JDBC_URL, getEnvOrDefault("RDS_JDBC_URL", ""));
-            config.put(RDS_USER, getEnvOrDefault("RDS_USER", ""));
-            config.put(RDS_PASSWORD, getEnvOrDefault("RDS_PASSWORD", ""));
+            LOG.info("Loading configuration from local properties file: {}", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
+            // Load from local properties file for local development
+            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
+                DataStreamIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
+            );
+            Properties flinkProps = props.getOrDefault("FlinkApplicationProperties", new Properties());
+            
+            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", ""));
+            config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-east-1"));
+            config.put(ICEBERG_CATALOG_NAME, flinkProps.getProperty("iceberg.catalog.name", "glue_catalog"));
+            config.put(ICEBERG_CATALOG_TYPE, flinkProps.getProperty("iceberg.catalog.type", "glue"));
+            config.put(ICEBERG_DATABASE, flinkProps.getProperty("iceberg.database", "iceberg_samples"));
+            config.put(ICEBERG_TABLE, flinkProps.getProperty("iceberg.table", "orders"));
+            config.put(ICEBERG_WAREHOUSE, flinkProps.getProperty("iceberg.warehouse", ""));
+            config.put(S3TABLES_BUCKET_ARN, flinkProps.getProperty("s3tables.bucket.arn", ""));
+            config.put(AWS_REGION, flinkProps.getProperty("aws.region", "us-east-1"));
+            config.put(CHECKPOINT_INTERVAL, flinkProps.getProperty("checkpoint.interval.ms", "60000"));
+            config.put(ICEBERG_BRANCH, flinkProps.getProperty("iceberg.branch", ""));
+            config.put(ENABLE_MAINTENANCE, flinkProps.getProperty("enable.maintenance", "false"));
+            config.put(RDS_JDBC_URL, flinkProps.getProperty("rds.jdbc.url", ""));
+            config.put(RDS_USER, flinkProps.getProperty("rds.user", ""));
+            config.put(RDS_PASSWORD, flinkProps.getProperty("rds.password", ""));
+            config.put(WRITE_MODE, flinkProps.getProperty("write.mode", "upsert"));
+            config.put(PRIMARY_KEY_COLUMNS, flinkProps.getProperty("primary.key.columns", "event_id,event_date,region"));
         } else {
             LOG.info("Loading configuration from Amazon Managed Service for Apache Flink runtime properties");
             // Load from Kinesis Analytics Runtime properties for MSF deployment
@@ -122,6 +131,8 @@ public class DataStreamIcebergJob {
             config.put(RDS_JDBC_URL, flinkProps.getProperty("rds.jdbc.url", ""));
             config.put(RDS_USER, flinkProps.getProperty("rds.user", ""));
             config.put(RDS_PASSWORD, flinkProps.getProperty("rds.password", ""));
+            config.put(WRITE_MODE, flinkProps.getProperty("write.mode", "upsert"));
+            config.put(PRIMARY_KEY_COLUMNS, flinkProps.getProperty("primary.key.columns", "event_id,event_date,region"));
         }
         
         LOG.info("Configuration loaded successfully");
@@ -445,7 +456,7 @@ public class DataStreamIcebergJob {
     }
     
     /**
-     * Configure IcebergSink (SinkV2) with v3 table format, delete vectors, and upsert mode.
+     * Configure IcebergSink (SinkV2) with configurable write mode (append or upsert).
      * Supports optional branch writes for staging data before merging to main.
      * Optionally adds post-commit maintenance topology with JDBC locks.
      * Requirements: 3.2, 3.3, 3.4, 3.5, 3.6
@@ -456,36 +467,55 @@ public class DataStreamIcebergJob {
             Map<String, String> config,
             StreamExecutionEnvironment env) {
         
-        // Configure equality fields for upsert mode (primary key + partition columns)
+        // Get write mode configuration (default: upsert for backward compatibility)
+        String writeMode = config.getOrDefault(WRITE_MODE, "upsert");
+        boolean isUpsertMode = "upsert".equalsIgnoreCase(writeMode);
+        
+        // Get primary key columns for upsert mode
         // When using HASH distribution with partitioned tables, partition columns must be in equality fields
-        List<String> equalityFieldColumns = Arrays.asList("event_id", "event_date", "region");
+        String primaryKeyColumnsStr = config.getOrDefault(PRIMARY_KEY_COLUMNS, "event_id,event_date,region");
+        List<String> equalityFieldColumns = Arrays.asList(primaryKeyColumnsStr.split(","));
         
         // Check if branch writes are enabled
         String branch = config.get(ICEBERG_BRANCH);
         boolean useBranchWrites = branch != null && !branch.isEmpty();
         
-        if (useBranchWrites) {
-            LOG.info("Configuring IcebergSink with branch writes to branch: {}", branch);
+        LOG.info("Configuring IcebergSink with write mode: {}", writeMode);
+        if (isUpsertMode) {
+            LOG.info("Upsert mode enabled with equality fields: {}", equalityFieldColumns);
         } else {
-            LOG.info("Configuring IcebergSink with upsert mode on equality fields: {}", equalityFieldColumns);
+            LOG.info("Append-only mode enabled (no deduplication)");
+        }
+        if (useBranchWrites) {
+            LOG.info("Branch writes enabled to branch: {}", branch);
         }
         
         // Build IcebergSink with SinkV2 features
         var sinkBuilder = IcebergSink.forRowData(rowDataStream)
             .tableLoader(tableLoader)
-            .upsert(true)  // Enable upsert mode for merge-on-read with delete vectors
-            .equalityFieldColumns(equalityFieldColumns)
-            // Configure write properties for v3 table format
+            // Configure write properties for v2 table format
             .set("write.format.default", "parquet")
             .set("write.target-file-size-bytes", "134217728")  // 128 MB
-            .set("write.delete.mode", "merge-on-read")  // Use delete vectors
-            .set("write.update.mode", "merge-on-read")
-            .set("write.merge.mode", "merge-on-read")
-            // Use HASH distribution mode with partition columns in equality fields
-            .distributionMode(org.apache.iceberg.DistributionMode.HASH)
             // Enable metrics for monitoring (Requirements: 3.6)
             .setSnapshotProperty("flink.job-id", "datastream-iceberg-job")
             .setSnapshotProperty("flink.max-committed-checkpoint-id", "0");
+        
+        // Configure upsert mode if enabled
+        if (isUpsertMode) {
+            sinkBuilder
+                .upsert(true)  // Enable upsert mode for merge-on-read with delete vectors
+                .equalityFieldColumns(equalityFieldColumns)
+                .set("write.delete.mode", "merge-on-read")  // Use delete vectors
+                .set("write.update.mode", "merge-on-read")
+                .set("write.merge.mode", "merge-on-read")
+                // Use HASH distribution mode with partition columns in equality fields
+                .distributionMode(org.apache.iceberg.DistributionMode.HASH);
+        } else {
+            // Append-only mode - no upsert, no equality fields
+            sinkBuilder
+                .upsert(false)
+                .distributionMode(org.apache.iceberg.DistributionMode.NONE);
+        }
         
         // Add branch configuration if specified
         if (useBranchWrites) {
@@ -514,7 +544,7 @@ public class DataStreamIcebergJob {
             LOG.info("Maintenance DISABLED - running without maintenance topology");
         }
         
-        LOG.info("IcebergSink configured successfully with v3 format, delete vectors, and metrics");
+        LOG.info("IcebergSink configured successfully with {} mode and metrics", writeMode);
     }
     
     /**
@@ -614,44 +644,5 @@ public class DataStreamIcebergJob {
                 Types.StringType.get()
             ))
         );
-    }
-    
-    /**
-     * Parse configuration from environment variables or command-line arguments.
-     * This method is kept for backward compatibility but loadApplicationProperties is preferred.
-     */
-    private static Map<String, String> parseConfiguration(String[] args) {
-        Map<String, String> config = new HashMap<>();
-        
-        // Read from environment variables (for Managed Flink)
-        config.put(KINESIS_STREAM_ARN, getEnvOrDefault("KINESIS_STREAM_ARN", ""));
-        config.put(KINESIS_REGION, getEnvOrDefault("KINESIS_REGION", "us-east-1"));
-        config.put(ICEBERG_CATALOG_NAME, getEnvOrDefault("ICEBERG_CATALOG_NAME", "glue_catalog"));
-        config.put(ICEBERG_DATABASE, getEnvOrDefault("ICEBERG_DATABASE", "iceberg_samples"));
-        config.put(ICEBERG_TABLE, getEnvOrDefault("ICEBERG_TABLE", "orders"));
-        config.put(ICEBERG_WAREHOUSE, getEnvOrDefault("ICEBERG_WAREHOUSE", ""));
-        config.put(AWS_REGION, getEnvOrDefault("AWS_REGION", "us-east-1"));
-        config.put(CHECKPOINT_INTERVAL, getEnvOrDefault("CHECKPOINT_INTERVAL_MS", "60000"));
-        config.put(ICEBERG_BRANCH, getEnvOrDefault("ICEBERG_BRANCH", ""));  // Optional branch for staging
-        config.put(ENABLE_MAINTENANCE, getEnvOrDefault("ENABLE_MAINTENANCE", "false"));
-        config.put(RDS_JDBC_URL, getEnvOrDefault("RDS_JDBC_URL", ""));
-        config.put(RDS_USER, getEnvOrDefault("RDS_USER", ""));
-        config.put(RDS_PASSWORD, getEnvOrDefault("RDS_PASSWORD", ""));
-        
-        // Override with command-line arguments if provided
-        for (int i = 0; i < args.length - 1; i += 2) {
-            String key = args[i].replaceFirst("^--", "");
-            String value = args[i + 1];
-            config.put(key, value);
-        }
-        
-        LOG.info("Configuration loaded: {}", config);
-        
-        return config;
-    }
-    
-    private static String getEnvOrDefault(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value != null ? value : defaultValue;
     }
 }
