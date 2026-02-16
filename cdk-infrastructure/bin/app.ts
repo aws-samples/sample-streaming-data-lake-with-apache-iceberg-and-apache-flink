@@ -66,6 +66,10 @@ if (enableNag) {
       id: 'AwsSolutions-L1',
       reason: 'Lambda runtime version is managed by CDK custom resource provider',
     },
+    {
+      id: 'AwsSolutions-S10',
+      reason: 'SSL enforcement on S3 bucket is optional for sample applications - enable in production',
+    },
   ]);
 }
 
