@@ -864,7 +864,7 @@ def handler(event, context):
         'iceberg.table': 'orders',  // Default table to read from
         'iceberg.source.streaming': 'true',
         'iceberg.source.monitor-interval': '60s',
-        'kinesis.sink.stream.name': resources.kinesisSinkStreamName!,
+        'kinesis.sink.stream.arn': resources.kinesisSinkStreamArn!,
       };
     } else if (appType === 'hybrid') {
       // Hybrid Source - bootstrap from Iceberg, then switch to Kinesis streaming
