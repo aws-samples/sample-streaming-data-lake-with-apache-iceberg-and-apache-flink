@@ -470,7 +470,7 @@ Get the Kinesis stream name from CDK outputs and run the data generator:
 # Get stream name from CDK output
 STREAM_NAME=$(aws cloudformation describe-stacks \
   --stack-name IcebergFlinkStack \
-  --query 'Stacks[0].Outputs[?OutputKey==`KinesisStreamName`].OutputValue' \
+  --query 'Stacks[0].Outputs[?OutputKey==`KinesisSourceStreamName`].OutputValue' \
   --output text)
 
 # Generate V1 schema events (100 events/sec for 60 seconds)
