@@ -34,7 +34,7 @@
         <aws.sdk.version>2.33.0</aws.sdk.version>
         <hadoop.version>3.4.0</hadoop.version>
         <kafka.version>3.6.0</kafka.version>
-        <jackson.version>2.15.2</jackson.version>
+        <jackson.version>2.18.6</jackson.version>
         <slf4j.version>1.7.36</slf4j.version>
     </properties>
 
@@ -289,7 +289,7 @@
             <dependency>
                 <groupId>org.postgresql</groupId>
                 <artifactId>postgresql</artifactId>
-                <version>42.7.1</version>
+                <version>42.7.7</version>
             </dependency>
 
             <!-- Jackson Dependencies -->
@@ -297,6 +297,13 @@
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson.version}</version>
+            </dependency>
+
+            <!-- Avro - pinned to fix CVE-2024-47561 (transitive from hadoop/iceberg) -->
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>1.11.4</version>
             </dependency>
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
