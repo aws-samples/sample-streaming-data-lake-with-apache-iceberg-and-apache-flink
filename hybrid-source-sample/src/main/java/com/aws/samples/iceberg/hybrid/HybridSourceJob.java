@@ -98,7 +98,7 @@ public class HybridSourceJob {
         LOG.info("============================================");
         
         // Create catalog loader and table loader for Iceberg
-        CatalogLoader catalogLoader = createCatalogLoader(catalogType, props);
+        CatalogLoader catalogLoader = com.aws.samples.iceberg.config.IcebergConfig.createCatalogLoader(catalogType, props);
         TableIdentifier tableId = TableIdentifier.of(database, tableName);
         TableLoader tableLoader = TableLoader.fromCatalog(catalogLoader, tableId);
         
@@ -189,52 +189,6 @@ public class HybridSourceJob {
                 .setPartitionKeyGenerator(element -> String.valueOf(element.hashCode()))
                 .setKinesisClientProperties(sinkProps)
                 .build();
-    }
-    
-    private static CatalogLoader createCatalogLoader(String catalogType, Properties props) {
-        String region = props.getProperty("aws.region", "us-east-1");
-        
-        if ("s3tables".equalsIgnoreCase(catalogType)) {
-            return createS3TablesCatalogLoader(props, region);
-        } else {
-            return createGlueCatalogLoader(props, region);
-        }
-    }
-    
-    private static CatalogLoader createGlueCatalogLoader(Properties props, String region) {
-        String warehouse = props.getProperty("iceberg.warehouse");
-        
-        Map<String, String> catalogProps = new HashMap<>();
-        catalogProps.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
-        catalogProps.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-        catalogProps.put("warehouse", warehouse);
-        catalogProps.put("client.region", region);
-        catalogProps.put("glue.region", region);
-        catalogProps.put("s3.region", region);
-        
-        return CatalogLoader.custom(
-                "glue_catalog",
-                catalogProps,
-                new org.apache.hadoop.conf.Configuration(),
-                "org.apache.iceberg.aws.glue.GlueCatalog"
-        );
-    }
-    
-    private static CatalogLoader createS3TablesCatalogLoader(Properties props, String region) {
-        String tableBucketArn = props.getProperty("s3tables.bucket.arn");
-        
-        Map<String, String> catalogProps = new HashMap<>();
-        catalogProps.put("catalog-impl", "software.amazon.s3tables.iceberg.S3TablesCatalog");
-        catalogProps.put("s3tables.catalog.client.region", region);
-        catalogProps.put("warehouse", tableBucketArn);
-        catalogProps.put("client.region", region);
-        
-        return CatalogLoader.custom(
-                "s3tables_catalog",
-                catalogProps,
-                new org.apache.hadoop.conf.Configuration(),
-                "software.amazon.s3tables.iceberg.S3TablesCatalog"
-        );
     }
     
     private static StreamExecutionEnvironment createExecutionEnvironment(Properties props) {

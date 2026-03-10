@@ -12,16 +12,13 @@ import org.apache.flink.connector.kinesis.sink.KinesisStreamsSink;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
-import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.flink.source.IcebergSource;
 import org.apache.iceberg.flink.source.StreamingStartingStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.amazon.s3tables.iceberg.S3TablesCatalog;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -90,7 +87,7 @@ public class IcebergSourceJob {
         LOG.info("=====================");
         
         // Create catalog loader and table loader
-        org.apache.iceberg.flink.CatalogLoader catalogLoader = createCatalogLoader(catalogType, props);
+        org.apache.iceberg.flink.CatalogLoader catalogLoader = com.aws.samples.iceberg.config.IcebergConfig.createCatalogLoader(catalogType, props);
         TableIdentifier tableId = TableIdentifier.of(database, tableName);
         org.apache.iceberg.flink.TableLoader tableLoader = org.apache.iceberg.flink.TableLoader.fromCatalog(catalogLoader, tableId);
         
@@ -190,57 +187,6 @@ public class IcebergSourceJob {
                 .setPartitionKeyGenerator(element -> String.valueOf(element.hashCode()))
                 .setKinesisClientProperties(sinkProps)
                 .build();
-    }
-    
-    private static org.apache.iceberg.flink.CatalogLoader createCatalogLoader(String catalogType, Properties props) {
-        String region = props.getProperty("aws.region", "us-east-1");
-        
-        if ("s3tables".equalsIgnoreCase(catalogType)) {
-            return createS3TablesCatalogLoader(props, region);
-        } else {
-            return createGlueCatalogLoader(props, region);
-        }
-    }
-    
-    private static org.apache.iceberg.flink.CatalogLoader createGlueCatalogLoader(Properties props, String region) {
-        String warehouse = props.getProperty("iceberg.warehouse");
-        
-        LOG.info("Creating Glue Catalog Loader with region: {}, warehouse: {}", region, warehouse);
-        
-        Map<String, String> catalogProps = new HashMap<>();
-        catalogProps.put(CatalogProperties.CATALOG_IMPL, GlueCatalog.class.getName());
-        catalogProps.put(CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.aws.s3.S3FileIO");
-        catalogProps.put(CatalogProperties.WAREHOUSE_LOCATION, warehouse);
-        // Set region for both Glue client and S3 client
-        catalogProps.put("client.region", region);
-        catalogProps.put("glue.region", region);
-        catalogProps.put("s3.region", region);
-        
-        return org.apache.iceberg.flink.CatalogLoader.custom(
-                "glue_catalog",
-                catalogProps,
-                new org.apache.hadoop.conf.Configuration(),
-                GlueCatalog.class.getName()
-        );
-    }
-    
-    private static org.apache.iceberg.flink.CatalogLoader createS3TablesCatalogLoader(Properties props, String region) {
-        String tableBucketArn = props.getProperty("s3tables.bucket.arn");
-        
-        LOG.info("Creating S3 Tables Catalog Loader with region: {}, bucket: {}", region, tableBucketArn);
-        
-        Map<String, String> catalogProps = new HashMap<>();
-        catalogProps.put(CatalogProperties.CATALOG_IMPL, S3TablesCatalog.class.getName());
-        catalogProps.put("s3tables.catalog.client.region", region);
-        catalogProps.put("warehouse", tableBucketArn);
-        catalogProps.put("client.region", region);
-        
-        return org.apache.iceberg.flink.CatalogLoader.custom(
-                "s3tables_catalog",
-                catalogProps,
-                new org.apache.hadoop.conf.Configuration(),
-                S3TablesCatalog.class.getName()
-        );
     }
     
     private static StreamingStartingStrategy parseStartingStrategy(String strategy) {

@@ -46,12 +46,7 @@ public class DynamicSinkJob {
     // Configuration keys
     private static final String KINESIS_STREAM_ARN = "kinesis.stream.arn";
     private static final String KINESIS_REGION = "kinesis.region";
-    private static final String ICEBERG_CATALOG_NAME = "iceberg.catalog.name";
-    private static final String ICEBERG_CATALOG_TYPE = "iceberg.catalog.type";
     private static final String ICEBERG_DATABASE = "iceberg.database";
-    private static final String ICEBERG_WAREHOUSE = "iceberg.warehouse";
-    private static final String S3TABLES_BUCKET_ARN = "s3tables.bucket.arn";
-    private static final String AWS_REGION = "aws.region";
     private static final String CHECKPOINT_INTERVAL = "checkpoint.interval.ms";
     private static final String CACHE_MAX_SIZE = "cache.max.size";
     private static final String CACHE_REFRESH_MS = "cache.refresh.ms";
@@ -211,51 +206,7 @@ public class DynamicSinkJob {
     }
     
     private static CatalogLoader createCatalogLoader(Map<String, String> config) {
-        String catalogName = config.getOrDefault(ICEBERG_CATALOG_NAME, "glue_catalog");
-        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
-        String warehouse = config.get(ICEBERG_WAREHOUSE);
-        String awsRegion = config.get(AWS_REGION);
-        
-        Map<String, String> catalogProperties = new HashMap<>();
-        catalogProperties.put("type", "iceberg");
-        
-        if ("s3tables".equals(catalogType)) {
-            String s3TableBucketArn = config.get(S3TABLES_BUCKET_ARN);
-            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
-                throw new IllegalArgumentException("S3 Tables bucket ARN is required when using S3 Tables catalog");
-            }
-            
-            catalogProperties.put("catalog-impl", "software.amazon.s3tables.iceberg.S3TablesCatalog");
-            catalogProperties.put("warehouse", s3TableBucketArn);
-            catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
-            
-            LOG.info("Creating S3 Tables catalog: {} with bucket: {}", catalogName, s3TableBucketArn);
-            
-            return CatalogLoader.custom(
-                catalogName,
-                catalogProperties,
-                new org.apache.hadoop.conf.Configuration(),
-                "software.amazon.s3tables.iceberg.S3TablesCatalog"
-            );
-        } else {
-            if (warehouse == null || warehouse.isEmpty()) {
-                throw new IllegalArgumentException("Iceberg warehouse path is required");
-            }
-            
-            catalogProperties.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
-            catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-            catalogProperties.put("warehouse", warehouse);
-            catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
-            
-            LOG.info("Creating Glue catalog: {} with warehouse: {}", catalogName, warehouse);
-            
-            return CatalogLoader.custom(
-                catalogName,
-                catalogProperties,
-                new org.apache.hadoop.conf.Configuration(),
-                "org.apache.iceberg.aws.glue.GlueCatalog"
-            );
-        }
+        return com.aws.samples.iceberg.config.IcebergConfig.createCatalogLoader(config);
     }
 
     
