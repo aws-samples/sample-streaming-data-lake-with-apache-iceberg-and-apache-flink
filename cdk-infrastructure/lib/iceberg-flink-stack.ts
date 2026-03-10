@@ -56,7 +56,7 @@ export class IcebergFlinkStack extends cdk.Stack {
         needsSinkStream: false,
       },
       'iceberg-source': {
-        modulePath: '../iceberg-source-datastream',
+        modulePath: '../iceberg-source-datastream-sample',
         jarName: 'iceberg-source-datastream-1.0-SNAPSHOT.jar',
         mainClass: 'com.aws.samples.iceberg.source.IcebergSourceJob',
         description: 'Read from Iceberg tables using DataStream API, write to Kinesis',
@@ -64,7 +64,7 @@ export class IcebergFlinkStack extends cdk.Stack {
         needsSinkStream: true,     // Writes to Kinesis
       },
       'iceberg-source-sql': {
-        modulePath: '../iceberg-source-sql',
+        modulePath: '../iceberg-source-sql-sample',
         jarName: 'iceberg-source-sql-1.0-SNAPSHOT.jar',
         mainClass: 'com.aws.samples.iceberg.source.sql.IcebergSourceSqlJob',
         description: 'Read from Iceberg tables using SQL API, write to Kinesis',

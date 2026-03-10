@@ -19,8 +19,8 @@
         <module>flink-sql-sample</module>
         <module>datastream-sample</module>
         <module>dynamic-sink-sample</module>
-        <module>iceberg-source-datastream</module>
-        <module>iceberg-source-sql</module>
+        <module>iceberg-source-datastream-sample</module>
+        <module>iceberg-source-sql-sample</module>
         <module>hybrid-source-sample</module>
     </modules>
 

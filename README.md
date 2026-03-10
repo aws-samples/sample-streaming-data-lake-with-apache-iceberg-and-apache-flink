@@ -114,7 +114,7 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 - Handles ANY JSON structure without code changes
 - Configurable routing field and table naming
 
-### 4. Iceberg Source - DataStream (`iceberg-source-datastream`)
+### 4. Iceberg Source - DataStream (`iceberg-source-datastream-sample`)
 **Best for: Reading Iceberg tables and streaming to Kinesis**
 
 - Uses FLIP-27 IcebergSource for streaming/batch reads
@@ -130,7 +130,7 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 
 **Important:** Streaming reads only work for APPEND-ONLY tables. Tables with upserts (equality deletes) are NOT supported for streaming.
 
-### 5. Iceberg Source - SQL (`iceberg-source-sql`)
+### 5. Iceberg Source - SQL (`iceberg-source-sql-sample`)
 **Best for: SQL-first approach to reading Iceberg tables**
 
 - Flink SQL for reading Iceberg tables
@@ -632,9 +632,9 @@ iceberg-flink-samples/
 │   └── sql/                       # DDL statements
 ├── dynamic-sink-sample/           # Dynamic Iceberg Sink (Schema-Agnostic)
 │   └── src/main/java/             # Dynamic routing logic
-├── iceberg-source-datastream/     # Iceberg Source (DataStream API)
+├── iceberg-source-datastream-sample/     # Iceberg Source (DataStream API)
 │   └── src/main/java/             # FLIP-27 IcebergSource to Kinesis
-├── iceberg-source-sql/            # Iceberg Source (SQL API)
+├── iceberg-source-sql-sample/            # Iceberg Source (SQL API)
 │   └── src/main/java/             # SQL-based Iceberg reading
 ├── hybrid-source-sample/          # Hybrid Source (Iceberg + Kinesis)
 │   └── src/main/java/             # Bootstrap from Iceberg, stream from Kinesis

@@ -45,3 +45,9 @@ cdk-infrastructure/*.d.ts
 
 # Backup files
 *.bak*
+
+# Classpath files
+*-classpath.txt
+
+# Environment variables
+.env

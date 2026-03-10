@@ -49,7 +49,7 @@ For streaming mode, you can configure how the source starts reading:
 
 ```bash
 # Build
-mvn clean package -pl iceberg-source-datastream -am -DskipTests
+mvn clean package -pl iceberg-source-datastream-sample -am -DskipTests
 
 # Run (configure flink-application-properties-dev.json first)
 java -jar target/iceberg-source-datastream-1.0-SNAPSHOT.jar

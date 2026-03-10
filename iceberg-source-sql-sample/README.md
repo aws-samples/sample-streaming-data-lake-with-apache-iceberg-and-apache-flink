@@ -75,7 +75,7 @@ SELECT * FROM database.table$partitions;
 
 ```bash
 # Build
-mvn clean package -pl iceberg-source-sql -am -DskipTests
+mvn clean package -pl iceberg-source-sql-sample -am -DskipTests
 
 # Run
 java -jar target/iceberg-source-sql-1.0-SNAPSHOT.jar
