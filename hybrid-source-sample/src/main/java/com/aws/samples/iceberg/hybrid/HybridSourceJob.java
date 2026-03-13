@@ -195,7 +195,7 @@ public class HybridSourceJob {
         Configuration config = new Configuration();
         
         if (isLocalDevelopment()) {
-            config.setInteger("rest.port", 8086);
+            config.set(org.apache.flink.configuration.RestOptions.PORT, 8086);
         }
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);

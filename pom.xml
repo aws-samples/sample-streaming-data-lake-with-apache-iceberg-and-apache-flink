@@ -11,7 +11,7 @@
     <packaging>pom</packaging>
 
     <name>Iceberg Flink Samples for AWS Managed Flink</name>
-    <description>Comprehensive samples demonstrating Apache Iceberg 1.10 with Apache Flink 1.20.3 for AWS Managed Flink</description>
+    <description>Comprehensive samples demonstrating Apache Iceberg 1.10 with Apache Flink 2.2.0 for AWS Managed Flink</description>
 
     <modules>
         <module>shared-common</module>
@@ -26,10 +26,12 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
-        <flink.version>1.20.3</flink.version>
-        <iceberg.version>1.10.0</iceberg.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <flink.version>2.2.0</flink.version>
+        <flink.connector.suffix>2.0</flink.connector.suffix>
+        <iceberg.version>1.10.1</iceberg.version>
+        <iceberg.flink.suffix>2.0</iceberg.flink.suffix>
         <scala.binary.version>2.12</scala.binary.version>
         <aws.sdk.version>2.33.0</aws.sdk.version>
         <hadoop.version>3.4.0</hadoop.version>
@@ -103,17 +105,12 @@
             <dependency>
                 <groupId>org.apache.flink</groupId>
                 <artifactId>flink-sql-connector-kafka</artifactId>
-                <version>3.4.0-1.20</version>
+                <version>4.0.1-${flink.connector.suffix}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.flink</groupId>
                 <artifactId>flink-connector-aws-kinesis-streams</artifactId>
-                <version>5.0.0-1.20</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.flink</groupId>
-                <artifactId>flink-connector-kinesis</artifactId>
-                <version>5.0.0-1.20</version>
+                <version>6.0.0-${flink.connector.suffix}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.flink</groupId>
@@ -136,7 +133,7 @@
             <!-- Iceberg Dependencies -->
             <dependency>
                 <groupId>org.apache.iceberg</groupId>
-                <artifactId>iceberg-flink-runtime-1.20</artifactId>
+                <artifactId>iceberg-flink-runtime-${iceberg.flink.suffix}</artifactId>
                 <version>${iceberg.version}</version>
                 <exclusions>
                     <exclusion>
@@ -373,8 +370,8 @@
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>3.11.0</version>
                     <configuration>
-                        <source>11</source>
-                        <target>11</target>
+                        <source>17</source>
+                        <target>17</target>
                     </configuration>
                 </plugin>
 

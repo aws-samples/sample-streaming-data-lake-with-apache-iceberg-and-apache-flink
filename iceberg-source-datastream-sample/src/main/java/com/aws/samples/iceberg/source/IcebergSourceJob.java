@@ -222,7 +222,7 @@ public class IcebergSourceJob {
         
         // Local development settings
         if (isLocalDevelopment()) {
-            config.setInteger("rest.port", 8084);
+            config.set(org.apache.flink.configuration.RestOptions.PORT, 8084);
         }
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);

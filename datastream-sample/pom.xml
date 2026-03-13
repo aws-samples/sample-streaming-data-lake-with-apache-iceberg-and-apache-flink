@@ -69,7 +69,7 @@
         <!-- Iceberg -->
         <dependency>
             <groupId>org.apache.iceberg</groupId>
-            <artifactId>iceberg-flink-runtime-1.20</artifactId>
+            <artifactId>iceberg-flink-runtime-${iceberg.flink.suffix}</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.iceberg</groupId>

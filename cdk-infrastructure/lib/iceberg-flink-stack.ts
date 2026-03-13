@@ -137,7 +137,7 @@ export class IcebergFlinkStack extends cdk.Stack {
       path: '..',
       exclude: ['cdk-infrastructure', 'cdk.out', '.git', '.idea', '.kiro', 'target', 'node_modules'],
       bundling: {
-        image: cdk.DockerImage.fromRegistry('maven:3.9-eclipse-temurin-11'),
+        image: cdk.DockerImage.fromRegistry('maven:3.9-eclipse-temurin-17'),
         command: [
           'bash', '-c',
           [
@@ -169,7 +169,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     // --- Flink Application ---
     const flinkApp = new kinesisanalytics.CfnApplication(this, 'FlinkApplication', {
       applicationName: `iceberg-flink-${appType}${enableMaintenance ? '-maintenance' : ''}`,
-      runtimeEnvironment: 'FLINK-1_20',
+      runtimeEnvironment: 'FLINK-2_2',
       serviceExecutionRole: flinkIam.role.roleArn,
       applicationConfiguration: {
         applicationCodeConfiguration: {
