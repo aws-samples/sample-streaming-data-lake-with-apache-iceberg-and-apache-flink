@@ -1,7 +1,6 @@
 # DataStream API Iceberg Sample
 
 This module demonstrates using Apache Flink's DataStream API with Apache Iceberg 1.10 and the new IcebergSink (SinkV2).
-
 ## Features
 
 - **IcebergSink (SinkV2)**: Uses the new Flink Sink interface for improved streaming writes
@@ -12,8 +11,8 @@ This module demonstrates using Apache Flink's DataStream API with Apache Iceberg
 
 ## Requirements
 
-- Apache Flink 1.20.3
-- Apache Iceberg 1.10.0
+- Apache Flink 2.2.0
+- Apache Iceberg 1.10.1
 - AWS Kinesis Data Streams
 - AWS Glue Data Catalog
 - Amazon S3

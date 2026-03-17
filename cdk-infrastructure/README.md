@@ -95,7 +95,7 @@ cdk deploy -c appType=iceberg-source -c catalogType=s3tables
 ## What Gets Deployed
 
 ### All Deployments
-- AWS Managed Flink application (Flink 1.20)
+- AWS Managed Flink application (Flink 2.2)
 - CloudWatch Log Group
 - IAM roles and policies
 

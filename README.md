@@ -1,10 +1,10 @@
-# Apache Iceberg 1.10 with Apache Flink 1.20 on AWS Managed Flink
+# Apache Iceberg 1.10 with Apache Flink 2.2 on AWS Managed Flink
 
-This repository contains production-ready sample applications demonstrating Apache Iceberg 1.10 integration with Apache Flink 1.20 on AWS Managed Service for Apache Flink. The samples showcase modern data lakehouse patterns including upsert operations, table maintenance, and multi-table routing.
+This repository contains production-ready sample applications demonstrating Apache Iceberg 1.10 integration with Apache Flink 2.2 on AWS Managed Service for Apache Flink. The samples showcase modern data lakehouse patterns including upsert operations, table maintenance, and multi-table routing.
 
 ## Introduction
 
-Apache Iceberg 1.10 introduces significant improvements for streaming workloads, including enhanced delete performance with delete vectors, improved metadata handling, and better support for upsert operations. Combined with Apache Flink 1.20's IcebergSink (SinkV2), these samples demonstrate how to build production-grade streaming data pipelines that write to Iceberg tables on AWS.
+Apache Iceberg 1.10 introduces significant improvements for streaming workloads, including enhanced delete performance with delete vectors, improved metadata handling, and better support for upsert operations. Combined with Apache Flink 2.2's IcebergSink (SinkV2), these samples demonstrate how to build production-grade streaming data pipelines that write to Iceberg tables on AWS.
 
 This repository provides three distinct patterns:
 - **DataStream API**: Production-grade ingestion with automated table maintenance
@@ -50,14 +50,14 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 - Amazon Kinesis Data Stream (2 shards, 24h retention)
 - Amazon S3 bucket (versioned, encrypted)
 - AWS Glue database for Iceberg catalog
-- AWS Managed Flink application (Flink 1.20)
+- AWS Managed Flink application (Flink 2.2)
 - CloudWatch Log Groups for monitoring
 
 **Core Resources (S3 Tables Catalog):**
 - Amazon Kinesis Data Stream (2 shards, 24h retention)
 - S3 Table Bucket (native Iceberg storage with automatic maintenance)
 - S3 Tables namespace
-- AWS Managed Flink application (Flink 1.20)
+- AWS Managed Flink application (Flink 2.2)
 - CloudWatch Log Groups for monitoring
 - Custom resource Lambda for namespace cleanup on stack deletion
 
@@ -662,7 +662,7 @@ iceberg-flink-samples/
 - ✅ Snapshot management and time travel
 - ✅ Metadata optimization
 
-### Flink 1.20 Features
+### Flink 2.2 Features
 - ✅ IcebergSink (SinkV2) for DataStream
 - ✅ Iceberg SQL connector for Table API
 - ✅ Exactly-once semantics with checkpointing
