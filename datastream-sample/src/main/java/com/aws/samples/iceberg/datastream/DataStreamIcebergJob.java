@@ -199,8 +199,31 @@ public class DataStreamIcebergJob {
         .name("Read from Kinesis");
         
         // Convert OrderEvent to RowData for Iceberg
+        // Provide explicit RowData type information to avoid Kryo fallback serialization
+        // which fails on Java 17+ due to module access restrictions
+        RowType rowType = RowType.of(
+            new LogicalType[]{
+                new VarCharType(VarCharType.MAX_LENGTH),           // event_id
+                new TimestampType(6),                              // event_time
+                new VarCharType(VarCharType.MAX_LENGTH),           // event_type
+                new VarCharType(VarCharType.MAX_LENGTH),           // region
+                new DateType(),                                     // event_date
+                new VarCharType(VarCharType.MAX_LENGTH),           // order_id
+                new VarCharType(VarCharType.MAX_LENGTH),           // customer_id
+                new DecimalType(18, 2),                            // amount
+                new VarCharType(VarCharType.MAX_LENGTH),           // currency
+                new VarCharType(VarCharType.MAX_LENGTH),           // status
+                new MapType(new VarCharType(VarCharType.MAX_LENGTH),
+                            new VarCharType(VarCharType.MAX_LENGTH))  // metadata
+            },
+            new String[]{
+                "event_id", "event_time", "event_type", "region", "event_date",
+                "order_id", "customer_id", "amount", "currency", "status", "metadata"
+            }
+        );
         DataStream<RowData> rowDataStream = orderEvents
             .map(EventToRowDataConverter::convertOrderEvent)
+            .returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(rowType))
             .uid("event-to-rowdata")
             .name("Convert to RowData");
         
