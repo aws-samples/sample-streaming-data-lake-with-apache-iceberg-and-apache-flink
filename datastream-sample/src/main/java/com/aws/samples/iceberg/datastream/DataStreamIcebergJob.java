@@ -87,18 +87,20 @@ public class DataStreamIcebergJob {
         if (isLocal(env)) {
             LOG.info("Loading configuration from local properties file: {}", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
             // Load from local properties file for local development
-            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
-                DataStreamIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
-            );
+
+                Map<String,Properties> props = new HashMap<>();
+//            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
+//                DataStreamIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
+//            );
             Properties flinkProps = props.getOrDefault("FlinkApplicationProperties", new Properties());
-            
-            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", ""));
-            config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-east-1"));
+
+            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source"));
+            config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-west-1"));
             config.put(ICEBERG_CATALOG_NAME, flinkProps.getProperty("iceberg.catalog.name", "glue_catalog"));
             config.put(ICEBERG_CATALOG_TYPE, flinkProps.getProperty("iceberg.catalog.type", "glue"));
             config.put(ICEBERG_DATABASE, flinkProps.getProperty("iceberg.database", "iceberg_samples"));
             config.put(ICEBERG_TABLE, flinkProps.getProperty("iceberg.table", "orders"));
-            config.put(ICEBERG_WAREHOUSE, flinkProps.getProperty("iceberg.warehouse", ""));
+            config.put(ICEBERG_WAREHOUSE, flinkProps.getProperty("iceberg.warehouse", "s3://iceberg-us-west-1-985539754032/warehouse/"));
             config.put(S3TABLES_BUCKET_ARN, flinkProps.getProperty("s3tables.bucket.arn", ""));
             config.put(AWS_REGION, flinkProps.getProperty("aws.region", "us-east-1"));
             config.put(CHECKPOINT_INTERVAL, flinkProps.getProperty("checkpoint.interval.ms", "60000"));
@@ -116,7 +118,7 @@ public class DataStreamIcebergJob {
             
             Properties flinkProps = applicationProperties.getOrDefault("FlinkApplicationProperties", new Properties());
             
-            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", ""));
+            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source"));
             config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-east-1"));
             config.put(ICEBERG_CATALOG_NAME, flinkProps.getProperty("iceberg.catalog.name", "glue_catalog"));
             config.put(ICEBERG_CATALOG_TYPE, flinkProps.getProperty("iceberg.catalog.type", "glue"));
@@ -278,14 +280,7 @@ public class DataStreamIcebergJob {
         checkpointConfig.setCheckpointTimeout(600000);  // 10 minutes
         checkpointConfig.setMaxConcurrentCheckpoints(1);
         checkpointConfig.setTolerableCheckpointFailureNumber(3);  // Allow 3 failures before job fails
-        checkpointConfig.setExternalizedCheckpointCleanup(
-            CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION
-        );
-        
-        // Enable unaligned checkpoints for better performance under backpressure
-        checkpointConfig.enableUnalignedCheckpoints(true);
-        checkpointConfig.setAlignedCheckpointTimeout(Duration.ofSeconds(30));
-        
+
         LOG.info("Checkpointing configured: interval={}ms, mode=EXACTLY_ONCE, unaligned=true", checkpointInterval);
     }
     

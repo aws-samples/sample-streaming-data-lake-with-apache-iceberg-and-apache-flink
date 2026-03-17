@@ -1,0 +1,19 @@
+[
+  {
+    "PropertyGroupId": "FlinkApplicationProperties",
+    "PropertyMap": {
+      "kinesis.stream.arn": "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source",
+      "kinesis.region": "us-west-1",
+      "aws.region": "us-west-1",
+      "iceberg.catalog.name": "glue_catalog",
+      "iceberg.catalog.type": "glue",
+      "iceberg.database": "iceberg_datastream",
+      "iceberg.table": "orders",
+      "iceberg.warehouse": "s3://your-bucket/warehouse",
+      "checkpoint.interval.ms": "60000",
+      "enable.maintenance": "false",
+      "write.mode": "upsert",
+      "primary.key.columns": "event_id,event_date,region"
+    }
+  }
+]

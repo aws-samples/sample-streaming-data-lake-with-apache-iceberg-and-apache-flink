@@ -157,11 +157,6 @@ public class DynamicSinkJob {
         checkpointConfig.setCheckpointTimeout(600000);
         checkpointConfig.setMaxConcurrentCheckpoints(1);
         checkpointConfig.setTolerableCheckpointFailureNumber(3);
-        checkpointConfig.setExternalizedCheckpointCleanup(
-            CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION
-        );
-        checkpointConfig.enableUnalignedCheckpoints(true);
-        checkpointConfig.setAlignedCheckpointTimeout(Duration.ofSeconds(30));
         
         LOG.info("Checkpointing configured: interval={}ms, mode=EXACTLY_ONCE", checkpointInterval);
     }
