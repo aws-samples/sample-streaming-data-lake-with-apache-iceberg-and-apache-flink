@@ -164,7 +164,7 @@ The CDK infrastructure provisions a complete streaming data pipeline:
 
 ## Prerequisites
 ### For Local Development
-- Java 11 or later
+- Java 17 or later
 - Apache Maven 3.6+
 - Docker and Docker Compose
 - AWS CLI configured with credentials
@@ -227,14 +227,16 @@ Configuration is in `src/main/resources/flink-application-properties-dev.json` f
 Or run from command line:
 ```bash
 # DataStream API
-java -jar datastream-sample/target/datastream-sample-1.0-SNAPSHOT.jar
+./run-sample.sh datastream-sample
 
 # SQL API
-java -jar flink-sql-sample/target/flink-sql-sample-1.0-SNAPSHOT.jar
+./run-sample.sh flink-sql-sample
 
 # Dynamic Sink
-java -jar dynamic-sink-sample/target/dynamic-sink-sample-1.0-SNAPSHOT.jar
+./run-sample.sh dynamic-sink-sample
 ```
+
+> **Note:** The `run-sample.sh` script automatically applies the required `--add-opens` JVM flags for Java 17+. If running directly with `java -jar`, source `jvm-opts-java17.sh` first.
 
 ### 5. Generate Test Data
 
@@ -245,13 +247,13 @@ The data generator creates realistic e-commerce events and sends them to Kinesis
 mvn clean package -pl data-generator -am -DskipTests
 
 # Run with default settings (V1 schema, continuous mode)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar <stream-name> <region> <events-per-second>
+./run-sample.sh data-generator <stream-name> <region> <events-per-second>
 
 # Run for specific duration with V1 schema (no optional fields)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar iceberg-events-datastream us-east-1 100 60 v1
+./run-sample.sh data-generator iceberg-events-datastream us-east-1 100 60 v1
 
 # Run with V2 schema (includes optional fields like userAgent, scrollDepth)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar iceberg-events-datastream us-east-1 100 60 v2
+./run-sample.sh data-generator iceberg-events-datastream us-east-1 100 60 v2
 ```
 
 **Arguments:**
@@ -474,13 +476,13 @@ STREAM_NAME=$(aws cloudformation describe-stacks \
   --output text)
 
 # Generate V1 schema events (100 events/sec for 60 seconds)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar $STREAM_NAME us-east-1 100 60 v1
+./run-sample.sh data-generator $STREAM_NAME us-east-1 100 60 v1
 
 # Or generate V2 schema events (with optional fields for schema evolution testing)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar $STREAM_NAME us-east-1 100 60 v2
+./run-sample.sh data-generator $STREAM_NAME us-east-1 100 60 v2
 
 # Continuous mode (runs until stopped with Ctrl+C)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar $STREAM_NAME us-east-1 50 -1 v1
+./run-sample.sh data-generator $STREAM_NAME us-east-1 50 -1 v1
 ```
 
 **Tip:** Start with V1 schema to establish baseline tables, then switch to V2 to test schema evolution.
