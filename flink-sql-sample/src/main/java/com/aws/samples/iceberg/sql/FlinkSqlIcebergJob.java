@@ -50,11 +50,13 @@ public class FlinkSqlIcebergJob {
      */
     private static Properties loadApplicationProperties(StreamExecutionEnvironment env) throws Exception {
         if (isLocal(env)) {
-            LOG.info("Loading application properties from '{}'", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
-            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
-                FlinkSqlIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
-            );
-            return props.getOrDefault("FlinkApplicationProperties", new Properties());
+//            LOG.info("Loading application properties from '{}'", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
+//            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
+//                FlinkSqlIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
+//            );
+//            return props.getOrDefault("FlinkApplicationProperties", new Properties());
+            Properties prop = new Properties();
+            return prop;
         } else {
             LOG.info("Loading application properties from Amazon Managed Service for Apache Flink");
             Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties();
@@ -92,9 +94,9 @@ public class FlinkSqlIcebergJob {
         // Load configuration from runtime properties
         Properties props = loadApplicationProperties(env);
         
-        String kinesisStreamName = props.getProperty("kinesis.stream.name", "iceberg-events");
-        String awsRegion = props.getProperty("aws.region", "us-east-1");
-        String s3WarehousePath = props.getProperty("s3.warehouse.path", "s3://iceberg-warehouse/warehouse");
+        String kinesisStreamArn = props.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source");
+        String awsRegion = props.getProperty("aws.region", "us-west-1");
+        String s3WarehousePath = props.getProperty("s3.warehouse.path", "s3://iceberg-us-west-1-985539754032/warehouse/");
         String glueDatabase = props.getProperty("glue.database", "iceberg_samples");
         String tablePrefix = props.getProperty("table.prefix", "sql_");
         String catalogType = props.getProperty("iceberg.catalog.type", "glue");
@@ -103,9 +105,9 @@ public class FlinkSqlIcebergJob {
         String writeMode = props.getProperty("write.mode", "append");  // "append" or "upsert"
         String primaryKeyColumns = props.getProperty("primary.key.columns", "event_id,event_date,region");
         boolean isUpsertMode = "upsert".equalsIgnoreCase(writeMode);
-        
+
         LOG.info("Starting Flink SQL Iceberg Job");
-        LOG.info("Kinesis Stream: {}", kinesisStreamName);
+        LOG.info("Kinesis Stream ARN: {}", kinesisStreamArn);
         LOG.info("AWS Region: {}", awsRegion);
         LOG.info("Catalog Type: {}", catalogType);
         LOG.info("Write Mode: {}", writeMode);
@@ -147,6 +149,12 @@ public class FlinkSqlIcebergJob {
             .inStreamingMode()
             .build();
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, settings);
+        
+        // Use SinkV2 (IcebergSink) for proper Java 17 checkpoint serialization
+        // On Managed Flink, this must be set via runtime properties (not programmatically)
+        if (isLocal(env)) {
+            tableEnv.getConfig().set("table.exec.iceberg.use-v2-sink", "true");
+        }
         
         LOG.info("Table environment created");
         
@@ -192,34 +200,31 @@ public class FlinkSqlIcebergJob {
         LOG.info("Creating Kinesis source table in default catalog");
         String createKinesisSourceSql = "CREATE TABLE kinesis_source (\n" +
             "    event_id STRING,\n" +
-            "    event_time STRING,\n" +  // Read as STRING, parse later
+            "    event_time STRING,\n" +
             "    event_type STRING,\n" +
             "    region STRING,\n" +
-            "    event_date STRING,\n" +  // Read as STRING, parse later
+            "    event_date STRING,\n" +
             "    metadata MAP<STRING, STRING>,\n" +
-            "    -- Order event fields\n" +
             "    order_id STRING,\n" +
             "    customer_id STRING,\n" +
-            "    amount DOUBLE,\n" +  // Use DOUBLE instead of DECIMAL for JSON compatibility
+            "    amount DOUBLE,\n" +
             "    currency STRING,\n" +
             "    status STRING,\n" +
-            "    -- User event fields\n" +
             "    user_id STRING,\n" +
             "    action STRING,\n" +
             "    device_type STRING,\n" +
             "    ip_address STRING,\n" +
             "    user_agent STRING,\n" +
-            "    -- Click event fields\n" +
             "    session_id STRING,\n" +
             "    page_url STRING,\n" +
             "    referrer STRING,\n" +
             "    scroll_depth INT,\n" +
             "    time_on_page_seconds BIGINT\n" +
             ") WITH (\n" +
-            "    'connector' = 'kinesis-legacy',\n" +
-            "    'stream' = '" + kinesisStreamName + "',\n" +
+            "    'connector' = 'kinesis',\n" +
+            "    'stream.arn' = '" + kinesisStreamArn + "',\n" +
             "    'aws.region' = '" + awsRegion + "',\n" +
-            "    'scan.stream.initpos' = 'LATEST',\n" +
+            "    'source.init.position' = 'LATEST',\n" +
             "    'format' = 'json',\n" +
             "    'json.fail-on-missing-field' = 'false',\n" +
             "    'json.ignore-parse-errors' = 'true'\n" +
@@ -335,7 +340,7 @@ public class FlinkSqlIcebergJob {
      */
     private static void createOrderEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
         String primaryKeyClause = isUpsertMode ? 
-            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+            ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
         String upsertProperties = isUpsertMode ?
             "    'write.upsert.enabled' = 'true',\n" +
@@ -354,7 +359,7 @@ public class FlinkSqlIcebergJob {
             "    amount DECIMAL(18, 2),\n" +
             "    currency STRING,\n" +
             "    status STRING,\n" +
-            "    metadata MAP<STRING, STRING>,\n" +
+            "    metadata MAP<STRING, STRING>" +
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
@@ -377,7 +382,7 @@ public class FlinkSqlIcebergJob {
      */
     private static void createUserEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
         String primaryKeyClause = isUpsertMode ? 
-            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+            ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
         String upsertProperties = isUpsertMode ?
             "    'write.upsert.enabled' = 'true',\n" +
@@ -396,7 +401,7 @@ public class FlinkSqlIcebergJob {
             "    device_type STRING,\n" +
             "    ip_address STRING,\n" +
             "    user_agent STRING,\n" +
-            "    metadata MAP<STRING, STRING>,\n" +
+            "    metadata MAP<STRING, STRING>" +
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
@@ -419,7 +424,7 @@ public class FlinkSqlIcebergJob {
      */
     private static void createClickEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
         String primaryKeyClause = isUpsertMode ? 
-            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+            ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
         String upsertProperties = isUpsertMode ?
             "    'write.upsert.enabled' = 'true',\n" +
@@ -438,7 +443,7 @@ public class FlinkSqlIcebergJob {
             "    referrer STRING,\n" +
             "    scroll_depth INT,\n" +
             "    time_on_page_seconds BIGINT,\n" +
-            "    metadata MAP<STRING, STRING>,\n" +
+            "    metadata MAP<STRING, STRING>" +
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +

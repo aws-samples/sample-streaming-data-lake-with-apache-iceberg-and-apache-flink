@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="DataStreamIcebergJob" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="com.aws.samples.iceberg.datastream.DataStreamIcebergJob" />
+    <module name="datastream-sample" />
+    <option name="VM_PARAMETERS" value="--add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/datastream-sample" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

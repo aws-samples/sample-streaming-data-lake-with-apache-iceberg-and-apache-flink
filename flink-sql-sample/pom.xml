@@ -64,7 +64,11 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Flink Kinesis Connector for SQL - MUST be included -->
+        <!-- Flink Kinesis SQL Connector -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-sql-connector-aws-kinesis-streams</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-aws-kinesis-streams</artifactId>

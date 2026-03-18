@@ -236,6 +236,8 @@ java -jar flink-sql-sample/target/flink-sql-sample-1.0-SNAPSHOT.jar
 java -jar dynamic-sink-sample/target/dynamic-sink-sample-1.0-SNAPSHOT.jar
 ```
 
+> **Note:** Some samples (SQL, Dynamic Sink) may require `--add-opens` JVM flags for local execution on Java 17+ due to Iceberg's checkpoint serialization. Use `./run-local.sh <module>` which applies these flags automatically. On AWS Managed Flink, these flags are set by the service.
+
 ### 5. Generate Test Data
 
 The data generator creates realistic e-commerce events and sends them to Kinesis:

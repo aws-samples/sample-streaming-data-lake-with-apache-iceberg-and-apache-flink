@@ -345,7 +345,8 @@ export class IcebergFlinkStack extends cdk.Stack {
     } else if (appType === 'sql') {
       const sqlProps: { [key: string]: string } = {
         ...baseProps,
-        'kinesis.stream.name': `iceberg-events-${appType}`,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.region': resources.region,
         'glue.database': `iceberg_${appType}`,
         'table.prefix': 'sql_',
         'write.mode': 'append',
