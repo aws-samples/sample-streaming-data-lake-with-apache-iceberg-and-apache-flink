@@ -51,10 +51,10 @@ public class FlinkSqlIcebergJob {
     private static Properties loadApplicationProperties(StreamExecutionEnvironment env) throws Exception {
         if (isLocal(env)) {
 //            LOG.info("Loading application properties from '{}'", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
-//            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
-//                FlinkSqlIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
-//            );
-//            return props.getOrDefault("FlinkApplicationProperties", new Properties());
+            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
+                FlinkSqlIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
+            );
+            return props.getOrDefault("FlinkApplicationProperties", new Properties());
             Properties prop = new Properties();
             return prop;
         } else {
