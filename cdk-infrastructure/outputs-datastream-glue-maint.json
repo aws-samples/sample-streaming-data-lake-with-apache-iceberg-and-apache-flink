@@ -1,0 +1,12 @@
+{
+  "IcebergFlinkStack": {
+    "WarehouseBucket": "iceberg-warehouse-datastream-985539754032",
+    "KinesisSourceStreamName": "iceberg-events-datastream",
+    "CatalogType": "glue",
+    "ApplicationName": "iceberg-flink-datastream-maintenance",
+    "DatabaseSecretArn": "arn:aws:secretsmanager:us-east-1:985539754032:secret:MaintenanceDbSecretEE4A8685-Xt4sWgj2h697-03raDf",
+    "GlueDatabaseName": "iceberg_datastream",
+    "AppType": "datastream",
+    "DatabaseEndpoint": "icebergflinkstack-maintenancemaintenancedb0bfdc5d9-fw6z185khl4z.cohakk2q0yf0.us-east-1.rds.amazonaws.com"
+  }
+}

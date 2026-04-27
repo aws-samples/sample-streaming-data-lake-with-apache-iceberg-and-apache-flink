@@ -1,0 +1,10 @@
+{
+  "IcebergFlinkStack": {
+    "WarehouseBucket": "iceberg-warehouse-datastream-985539754032",
+    "KinesisSourceStreamName": "iceberg-events-datastream",
+    "CatalogType": "glue",
+    "ApplicationName": "iceberg-flink-datastream",
+    "GlueDatabaseName": "iceberg_datastream",
+    "AppType": "datastream"
+  }
+}
