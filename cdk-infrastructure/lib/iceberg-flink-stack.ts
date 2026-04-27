@@ -77,7 +77,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     }
 
     const config = APP_CONFIG[appType];
-    const databaseName = `iceberg_${appType}`;
+    const databaseName = `iceberg_${appType.replace(/-/g, '_')}`;
     const cdkBootstrapQualifier = this.node.tryGetContext('cdkBootstrapQualifier') || 'hnb659fds';
 
     // --- Kinesis Streams ---
@@ -312,7 +312,7 @@ export class IcebergFlinkStack extends cdk.Stack {
       'aws.region': resources.region,
       'iceberg.catalog.name': catalogType === 's3tables' ? 's3tables_catalog' : 'glue_catalog',
       'iceberg.catalog.type': catalogType,
-      'iceberg.database': `iceberg_${appType}`,
+      'iceberg.database': `iceberg_${appType.replace(/-/g, '_')}`,
       'checkpoint.interval.ms': '60000',
     };
 
@@ -347,7 +347,7 @@ export class IcebergFlinkStack extends cdk.Stack {
         ...baseProps,
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
-        'glue.database': `iceberg_${appType}`,
+        'glue.database': `iceberg_${appType.replace(/-/g, '_')}`,
         'table.prefix': 'sql_',
         'write.mode': 'append',
         'primary.key.columns': 'event_id,event_date,region',

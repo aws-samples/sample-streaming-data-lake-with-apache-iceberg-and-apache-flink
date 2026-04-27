@@ -229,10 +229,20 @@ public class HybridSourceJob {
     }
     
     private static Map<String, Properties> loadApplicationProperties() throws IOException {
-        if (isLocalDevelopment()) {
+        // Try to load from KinesisAnalyticsRuntime (AWS Managed Flink)
+        // Falls back to local properties file if running locally
+        Map<String, Properties> runtimeProps;
+        try {
+            runtimeProps = KinesisAnalyticsRuntime.getApplicationProperties();
+        } catch (Exception e) {
+            runtimeProps = new HashMap<>();
+        }
+        if (runtimeProps == null || runtimeProps.isEmpty()) {
+            LOG.info("No runtime properties from Managed Flink, loading local properties");
             return loadLocalProperties();
         }
-        return KinesisAnalyticsRuntime.getApplicationProperties();
+        LOG.info("Loaded runtime properties from Managed Flink");
+        return runtimeProps;
     }
     
     private static Map<String, Properties> loadLocalProperties() throws IOException {
