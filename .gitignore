@@ -51,3 +51,6 @@ cdk-infrastructure/*.d.ts
 
 # Environment variables
 .env
+
+# CDK deployment outputs
+cdk-infrastructure/outputs-*.json
