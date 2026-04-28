@@ -25,7 +25,7 @@ const sourceTableBucketArn = app.node.tryGetContext('sourceTableBucketArn');
 const stackSuffix = app.node.tryGetContext('stackSuffix') || '';
 
 const stack = new IcebergFlinkStack(app, `IcebergFlinkStack${stackSuffix ? '-' + stackSuffix : ''}`, {
-  appType: appType as 'datastream' | 'sql' | 'dynamic' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid',
+  appType: appType as 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid',
   enableMaintenance: enableMaintenance,
   catalogType: catalogType as 'glue' | 's3tables',
   sourceDatabase,

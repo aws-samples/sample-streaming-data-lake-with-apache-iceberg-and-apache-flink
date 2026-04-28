@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "ClickEvent",
+  "namespace": "com.aws.samples.iceberg.events",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-micros"}},
+    {"name": "event_type", "type": "string"},
+    {"name": "region", "type": "string"},
+    {"name": "event_date", "type": {"type": "int", "logicalType": "date"}},
+    {"name": "session_id", "type": "string"},
+    {"name": "page_url", "type": "string"},
+    {"name": "referrer", "type": ["null", "string"], "default": null},
+    {"name": "scroll_depth", "type": ["null", "int"], "default": null},
+    {"name": "time_on_page_seconds", "type": ["null", "long"], "default": null}
+  ]
+}

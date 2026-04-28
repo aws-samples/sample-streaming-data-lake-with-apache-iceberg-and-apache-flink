@@ -19,6 +19,7 @@
         <module>flink-sql-sample</module>
         <module>datastream-sample</module>
         <module>dynamic-sink-sample</module>
+        <module>dynamic-sink-avro-sample</module>
         <module>iceberg-source-datastream-sample</module>
         <module>iceberg-source-sql-sample</module>
         <module>hybrid-source-sample</module>
@@ -38,6 +39,8 @@
         <kafka.version>3.6.0</kafka.version>
         <jackson.version>2.18.6</jackson.version>
         <slf4j.version>1.7.36</slf4j.version>
+        <avro.version>1.11.3</avro.version>
+        <glue.schema.registry.version>1.1.27</glue.schema.registry.version>
     </properties>
 
     <repositories>
@@ -126,6 +129,30 @@
                 <groupId>org.apache.flink</groupId>
                 <artifactId>flink-json</artifactId>
                 <version>${flink.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.flink</groupId>
+                <artifactId>flink-avro</artifactId>
+                <version>${flink.version}</version>
+            </dependency>
+
+            <!-- Apache Avro -->
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
+            </dependency>
+
+            <!-- AWS Glue Schema Registry SerDe (Avro + Flink) -->
+            <dependency>
+                <groupId>software.amazon.glue</groupId>
+                <artifactId>schema-registry-flink-serde</artifactId>
+                <version>${glue.schema.registry.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>software.amazon.glue</groupId>
+                <artifactId>schema-registry-serde</artifactId>
+                <version>${glue.schema.registry.version}</version>
             </dependency>
             
             <!-- AWS Managed Service for Apache Flink (Kinesis Analytics) Runtime -->

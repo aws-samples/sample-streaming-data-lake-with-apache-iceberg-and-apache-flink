@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "OrderEvent",
+  "namespace": "com.aws.samples.iceberg.events",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-micros"}},
+    {"name": "event_type", "type": "string"},
+    {"name": "region", "type": "string"},
+    {"name": "event_date", "type": {"type": "int", "logicalType": "date"}},
+    {"name": "order_id", "type": "string"},
+    {"name": "customer_id", "type": "string"},
+    {"name": "amount", "type": "double"},
+    {"name": "currency", "type": "string"},
+    {"name": "status", "type": "string"}
+  ]
+}

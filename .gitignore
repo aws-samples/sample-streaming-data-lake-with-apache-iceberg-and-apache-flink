@@ -54,3 +54,6 @@ cdk-infrastructure/*.d.ts
 
 # CDK deployment outputs
 cdk-infrastructure/outputs-*.json
+
+# Extracted debug class files
+/com/

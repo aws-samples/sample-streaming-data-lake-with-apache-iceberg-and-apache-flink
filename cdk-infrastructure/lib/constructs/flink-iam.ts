@@ -27,6 +27,8 @@ export interface FlinkIamProps {
   sourceWarehouse?: string;        // S3 warehouse path (e.g., s3://bucket/warehouse)
   sourceTableBucketArn?: string;   // S3 Table Bucket ARN
   sourceDatabase?: string;         // External Glue database name (for glue: permissions)
+  // Glue Schema Registry (for dynamic-avro app type)
+  schemaRegistryName?: string;
 }
 
 export class FlinkIam extends Construct {
@@ -164,6 +166,26 @@ export class FlinkIam extends Construct {
           's3tables:GetTablePolicy', 's3tables:PutTablePolicy',
         ],
         resources: [`arn:aws:s3tables:${props.region}:${props.account}:bucket/${props.s3TableBucketName}/table/*`],
+      }));
+    }
+
+    // Glue Schema Registry permissions (for dynamic-avro app type)
+    if (props.schemaRegistryName) {
+      this.role.addToPolicy(new iam.PolicyStatement({
+        sid: 'GlueSchemaRegistryAccess',
+        actions: [
+          'glue:GetRegistry', 'glue:ListRegistries',
+          'glue:CreateSchema', 'glue:DeleteSchema', 'glue:UpdateSchema',
+          'glue:GetSchema', 'glue:ListSchemas',
+          'glue:RegisterSchemaVersion', 'glue:GetSchemaVersion', 'glue:ListSchemaVersions',
+          'glue:GetSchemaByDefinition',
+          'glue:QuerySchemaVersionMetadata', 'glue:PutSchemaVersionMetadata',
+          'glue:CheckSchemaVersionValidity',
+        ],
+        resources: [
+          `arn:aws:glue:${props.region}:${props.account}:registry/${props.schemaRegistryName}`,
+          `arn:aws:glue:${props.region}:${props.account}:schema/${props.schemaRegistryName}/*`,
+        ],
       }));
     }
 

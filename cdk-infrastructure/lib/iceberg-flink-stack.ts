@@ -9,7 +9,7 @@ import { MaintenanceResources } from './constructs/maintenance-resources';
 import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
-  appType: 'datastream' | 'sql' | 'dynamic' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid';
+  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid';
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';
   // Source-app overrides: when set, source apps (iceberg-source, iceberg-source-sql,
@@ -43,6 +43,14 @@ const APP_CONFIG = {
     jarName: 'dynamic-sink-sample-1.0-SNAPSHOT.jar',
     mainClass: 'com.aws.samples.iceberg.dynamic.DynamicSinkJob',
     description: 'Dynamic Iceberg Sink with automatic table routing',
+    needsSourceStream: true,
+    needsSinkStream: false,
+  },
+  'dynamic-avro': {
+    modulePath: '../dynamic-sink-avro-sample',
+    jarName: 'dynamic-sink-avro-sample-1.0-SNAPSHOT.jar',
+    mainClass: 'com.aws.samples.iceberg.dynamic.avro.DynamicAvroSinkJob',
+    description: 'Dynamic Iceberg Sink driven by AWS Glue Schema Registry (Avro)',
     needsSourceStream: true,
     needsSinkStream: false,
   },
@@ -92,6 +100,16 @@ export class IcebergFlinkStack extends cdk.Stack {
       needsSourceStream: config.needsSourceStream,
       needsSinkStream: config.needsSinkStream,
     });
+
+    // --- Glue Schema Registry (dynamic-avro only) ---
+    let schemaRegistry: cdk.aws_glue.CfnRegistry | undefined;
+    if (appType === 'dynamic-avro') {
+      schemaRegistry = new cdk.aws_glue.CfnRegistry(this, 'SchemaRegistry', {
+        name: `iceberg-${appType}`,
+        description: 'Schema registry for Avro-encoded events consumed by the Flink dynamic sink sample',
+      });
+      schemaRegistry.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+    }
 
     // --- Catalog Resources (Glue or S3 Tables) ---
     // If source overrides are provided, skip creating a local catalog (source apps
@@ -143,6 +161,7 @@ export class IcebergFlinkStack extends cdk.Stack {
       enableMaintenance: appType === 'datastream' && enableMaintenance,
       vpc: maintenance?.vpc,
       dbSecret: maintenance?.dbSecret,
+      schemaRegistryName: schemaRegistry?.name,
     });
 
     // --- Flink JAR Asset ---
@@ -241,6 +260,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     if (streams.sinkStream) flinkApp.node.addDependency(streams.sinkStream);
     if (catalog.warehouseBucket) flinkApp.node.addDependency(catalog.warehouseBucket);
     if (catalog.glueDatabase) flinkApp.node.addDependency(catalog.glueDatabase);
+    if (schemaRegistry) flinkApp.node.addDependency(schemaRegistry);
     flinkApp.node.addDependency(logGroup);
     flinkApp.node.addDependency(logStream);
 
@@ -298,6 +318,12 @@ export class IcebergFlinkStack extends cdk.Stack {
       value: appType,
       description: 'Deployed application type',
     });
+    if (schemaRegistry) {
+      new cdk.CfnOutput(this, 'SchemaRegistryName', {
+        value: schemaRegistry.name,
+        description: 'Glue Schema Registry name for Avro schemas',
+      });
+    }
     if (maintenance) {
       new cdk.CfnOutput(this, 'DatabaseEndpoint', {
         value: maintenance.database.dbInstanceEndpointAddress,
@@ -407,6 +433,14 @@ export class IcebergFlinkStack extends cdk.Stack {
         'iceberg.table': resources.sourceTable || 'orders',
         'kinesis.source.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.sink.stream.arn': resources.kinesisSinkStreamArn!,
+      };
+    } else if (appType === 'dynamic-avro') {
+      return {
+        ...baseProps,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.region': resources.region,
+        'schema.registry.name': `iceberg-${appType}`,
+        'partition.candidates': 'event_date,region',
       };
     } else {
       // dynamic
