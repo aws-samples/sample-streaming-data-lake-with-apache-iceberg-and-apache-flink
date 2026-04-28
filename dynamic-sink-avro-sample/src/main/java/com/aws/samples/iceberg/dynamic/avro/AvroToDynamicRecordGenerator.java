@@ -1,12 +1,17 @@
 package com.aws.samples.iceberg.dynamic.avro;
 
+import com.amazonaws.services.schemaregistry.deserializers.GlueSchemaRegistryDeserializationFacade;
+import com.amazonaws.services.schemaregistry.utils.AWSSchemaRegistryConstants;
+import com.amazonaws.services.schemaregistry.utils.AvroRecordType;
+import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.avro.io.BinaryDecoder;
+import org.apache.avro.io.DecoderFactory;
+import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
-import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.util.Collector;
 import org.apache.iceberg.DistributionMode;
 import org.apache.iceberg.PartitionSpec;
@@ -29,80 +34,115 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Converts an Avro {@link GenericRecord} (with its schema name from GSR) into Iceberg's
- * {@link DynamicRecord}.
+ * Receives raw GSR-wrapped Avro bytes and emits Iceberg DynamicRecords.
  *
- * Routing policy: the schema name becomes the Iceberg table name (lowercased, with
- * hyphens replaced by underscores for Iceberg identifier compatibility). The database
- * and partitioning candidates come from configuration.
+ * Responsibilities:
+ *  - Resolve the writer schema from GSR (facade caches by UUID).
+ *  - Decode the Avro payload into a GenericRecord.
+ *  - Convert the Avro schema to an Iceberg schema (cached by Avro schema identity).
+ *  - Build a RowData and route to an Iceberg table named after the GSR schema.
  *
- * The Avro writer schema is converted to an Iceberg schema once per schema name via
- * {@link AvroSchemaUtil#toIceberg} and cached. This avoids re-parsing schemas on every
- * record and lets the downstream DynamicIcebergSink reuse its own schema cache.
+ * Keeping the GSR facade + schema caches in this operator (rather than transmitting
+ * decoded records between operators) avoids the need to serialize GenericRecord with
+ * Kryo, which is slow and sometimes impossible due to unmodifiable collections in
+ * Avro's Schema model.
  */
 public class AvroToDynamicRecordGenerator
-        implements DynamicRecordGenerator<Tuple2<String, GenericRecord>> {
+        implements DynamicRecordGenerator<byte[]> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AvroToDynamicRecordGenerator.class);
     private static final long serialVersionUID = 1L;
 
+    private final String awsRegion;
+    private final String registryName;
     private final String database;
     private final List<String> partitionCandidates;
     private final String branch;
 
-    // Caches keyed by schema full name (schema identity is stable within a version)
-    private transient Map<String, Schema> icebergSchemaCache;
+    // Lazy-initialized per task
+    private transient GlueSchemaRegistryDeserializationFacade facade;
+    private transient Map<String, org.apache.avro.Schema> writerSchemaCache;
+    private transient Map<org.apache.avro.Schema, Schema> icebergSchemaCache;
     private transient Map<String, TableIdentifier> tableIdCache;
 
-    public AvroToDynamicRecordGenerator(String database,
+    public AvroToDynamicRecordGenerator(String awsRegion,
+                                        String registryName,
+                                        String database,
                                         List<String> partitionCandidates,
                                         String branch) {
+        this.awsRegion = awsRegion;
+        this.registryName = registryName;
         this.database = database;
         this.partitionCandidates = partitionCandidates;
         this.branch = branch;
     }
 
-    @Override
-    public void generate(Tuple2<String, GenericRecord> input,
-                         Collector<DynamicRecord> out) {
-        if (icebergSchemaCache == null) {
-            icebergSchemaCache = new HashMap<>();
-            tableIdCache = new HashMap<>();
+    private void ensureInitialized() {
+        if (facade != null) return;
+
+        Map<String, Object> configs = new HashMap<>();
+        configs.put(AWSSchemaRegistryConstants.AWS_REGION, awsRegion);
+        configs.put(AWSSchemaRegistryConstants.AVRO_RECORD_TYPE, AvroRecordType.GENERIC_RECORD.getName());
+        if (registryName != null && !registryName.isEmpty()) {
+            configs.put(AWSSchemaRegistryConstants.REGISTRY_NAME, registryName);
         }
+        facade = GlueSchemaRegistryDeserializationFacade.builder()
+                .credentialProvider(software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider.create())
+                .configs(configs)
+                .build();
+        writerSchemaCache = new HashMap<>();
+        icebergSchemaCache = new HashMap<>();
+        tableIdCache = new HashMap<>();
+        LOG.info("Initialized GSR generator: region={}, registry={}, database={}",
+                awsRegion, registryName, database);
+    }
 
-        String schemaName = input.f0;
-        GenericRecord record = input.f1;
-        org.apache.avro.Schema avroSchema = record.getSchema();
-        String cacheKey = avroSchema.getFullName() + "#" + avroSchema.hashCode();
+    @Override
+    public void generate(byte[] bytes, Collector<DynamicRecord> out) throws Exception {
+        if (bytes == null || bytes.length == 0) return;
+        ensureInitialized();
 
-        Schema icebergSchema = icebergSchemaCache.computeIfAbsent(cacheKey,
-                k -> convertAvroSchema(avroSchema));
-        TableIdentifier tableId = tableIdCache.computeIfAbsent(schemaName,
-                k -> TableIdentifier.of(database, normalizeTableName(schemaName)));
+        // Resolve schema (cached inside the facade and in our writerSchemaCache)
+        com.amazonaws.services.schemaregistry.common.Schema gsrSchema = facade.getSchema(bytes);
+        String schemaName = gsrSchema.getSchemaName();
+
+        org.apache.avro.Schema writerSchema = writerSchemaCache.computeIfAbsent(
+                gsrSchema.getSchemaDefinition(),
+                def -> new org.apache.avro.Schema.Parser().parse(def));
+
+        Schema icebergSchema = icebergSchemaCache.computeIfAbsent(
+                writerSchema, this::convertAvroSchema);
+
+        TableIdentifier tableId = tableIdCache.computeIfAbsent(
+                schemaName, n -> TableIdentifier.of(database, normalizeTableName(n)));
+        String writeBranch = (branch == null || branch.isEmpty()) ? "main" : branch;
+
+        // Decode the Avro payload
+        byte[] avroPayload = facade.getActualData(bytes);
+        GenericDatumReader<GenericRecord> reader = new GenericDatumReader<>(writerSchema);
+        BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(avroPayload, null);
+        GenericRecord record = reader.read(null, decoder);
 
         RowData rowData = convertToRowData(record, icebergSchema);
-
         PartitionSpec spec = buildPartitionSpec(icebergSchema);
 
-        DynamicRecord dyn = new DynamicRecord(
+        out.collect(new DynamicRecord(
                 tableId,
-                branch,
+                writeBranch,
                 icebergSchema,
                 rowData,
                 spec,
                 DistributionMode.HASH,
-                2);
-        out.collect(dyn);
+                2));
     }
 
     private Schema convertAvroSchema(org.apache.avro.Schema avroSchema) {
-        // Iceberg's AvroSchemaUtil uses a shaded Avro; round-trip the schema through
-        // JSON so we work with whichever Avro version Iceberg expects internally.
+        // Iceberg uses shaded Avro, so round-trip via JSON
         String json = avroSchema.toString();
         org.apache.iceberg.shaded.org.apache.avro.Schema shadedSchema =
                 new org.apache.iceberg.shaded.org.apache.avro.Schema.Parser().parse(json);
         Schema schema = AvroSchemaUtil.toIceberg(shadedSchema);
-        LOG.info("Converted Avro schema '{}' to Iceberg schema with {} fields",
+        LOG.info("Converted Avro schema '{}' to Iceberg schema ({} fields)",
                 avroSchema.getFullName(), schema.columns().size());
         return schema;
     }
@@ -119,14 +159,11 @@ public class AvroToDynamicRecordGenerator
             if (field == null) continue;
             Type.TypeID typeId = field.type().typeId();
             try {
-                if (typeId == Type.TypeID.DATE) {
+                if (typeId == Type.TypeID.DATE || typeId == Type.TypeID.STRING) {
                     builder.identity(field.name());
                     hasPartition = true;
                 } else if (typeId == Type.TypeID.TIMESTAMP) {
                     builder.day(field.name());
-                    hasPartition = true;
-                } else if (typeId == Type.TypeID.STRING) {
-                    builder.identity(field.name());
                     hasPartition = true;
                 }
             } catch (Exception e) {

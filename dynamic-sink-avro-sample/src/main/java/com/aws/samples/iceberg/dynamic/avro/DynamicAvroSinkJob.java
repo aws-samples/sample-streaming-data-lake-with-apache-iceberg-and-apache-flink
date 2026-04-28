@@ -2,9 +2,8 @@ package com.aws.samples.iceberg.dynamic.avro;
 
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import com.aws.samples.iceberg.config.IcebergConfig;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kinesis.source.KinesisStreamsSource;
 import org.apache.flink.streaming.api.CheckpointingMode;
@@ -25,30 +24,21 @@ import java.util.Properties;
 /**
  * Dynamic Iceberg Sink driven by AWS Glue Schema Registry (Avro).
  *
- * Producers publish Avro records to Kinesis with GSR's wire format. This job reads
- * those bytes, resolves the writer schema from GSR (cached locally), converts each
- * record to an Iceberg DynamicRecord, and routes it to an Iceberg table named after
- * the GSR schema.
+ * Pipeline:
+ *   Kinesis (raw GSR-wrapped bytes)
+ *     -> GsrAvroBytesDeserializer (pass-through; keeps wire format intact)
+ *     -> AvroToDynamicRecordGenerator (resolves schema from GSR, decodes,
+ *                                      converts to Iceberg DynamicRecord)
+ *     -> DynamicIcebergSink (routes to Iceberg tables based on schema name)
  *
- * Configuration:
- *   kinesis.stream.arn        - Kinesis stream ARN
- *   kinesis.region            - AWS region for Kinesis
- *   aws.region                - AWS region for GSR + catalog
- *   schema.registry.name      - GSR registry name (optional; 'default-registry' if omitted)
- *   iceberg.catalog.type      - 'glue' or 's3tables'
- *   iceberg.catalog.name      - catalog logical name
- *   iceberg.database          - Iceberg database/namespace to write into
- *   iceberg.warehouse         - S3 warehouse path (Glue catalog)
- *   s3tables.bucket.arn       - S3 Tables bucket ARN (S3 Tables catalog)
- *   iceberg.branch            - optional branch for all writes
- *   partition.candidates      - comma-separated field names to try for partitioning
- *   cache.max.size            - DynamicIcebergSink cache max size
- *   cache.refresh.ms          - DynamicIcebergSink cache refresh interval
+ * Schemas are registered in Glue Schema Registry by producers. No schemas need to be
+ * pre-declared in this job - new schemas are discovered automatically when records
+ * arrive and referenced schema versions are resolved on first use (GSR caches
+ * subsequent lookups per schema UUID).
  */
 public class DynamicAvroSinkJob {
 
     private static final Logger LOG = LoggerFactory.getLogger(DynamicAvroSinkJob.class);
-
     private static final String LOCAL_PROPS_RESOURCE = "flink-application-properties-dev.json";
 
     public static void main(String[] args) throws Exception {
@@ -71,40 +61,39 @@ public class DynamicAvroSinkJob {
         LOG.info("  Kinesis stream: {}", streamArn);
         LOG.info("  GSR registry: {}", registryName.isEmpty() ? "default-registry" : registryName);
         LOG.info("  Iceberg database: {}", database);
-        LOG.info("  Partition candidates: {}", partitionCandidates);
 
         if (isLocal(env)) {
             configureCheckpointing(env, config);
         }
 
-        // Source: read bytes from Kinesis, deserialize against GSR
-        GsrMultiSchemaDeserializer deserializer = new GsrMultiSchemaDeserializer(awsRegion, registryName);
-
+        // Source: read raw GSR-wrapped bytes (no decoding on the source side to avoid
+        // serializing Avro GenericRecord between operators)
         Configuration sourceConfig = new Configuration();
         sourceConfig.setString("aws.region", kinesisRegion);
         sourceConfig.setString("flink.stream.initpos", "LATEST");
         sourceConfig.setString("flink.shard.discovery.intervalmillis", "10000");
 
-        KinesisStreamsSource<Tuple2<String, GenericRecord>> source =
-                KinesisStreamsSource.<Tuple2<String, GenericRecord>>builder()
-                        .setStreamArn(streamArn)
-                        .setDeserializationSchema(deserializer)
-                        .setSourceConfig(sourceConfig)
-                        .build();
+        KinesisStreamsSource<byte[]> source = KinesisStreamsSource.<byte[]>builder()
+                .setStreamArn(streamArn)
+                .setDeserializationSchema(new GsrAvroBytesDeserializer())
+                .setSourceConfig(sourceConfig)
+                .build();
 
-        DataStream<Tuple2<String, GenericRecord>> events = env.fromSource(
+        DataStream<byte[]> eventBytes = env.fromSource(
                         source,
                         WatermarkStrategy.noWatermarks(),
-                        "Kinesis Source (GSR Avro)")
-                .uid("kinesis-gsr-source");
+                        "Kinesis Source (GSR wire-format bytes)",
+                        PrimitiveArrayTypeInfo.BYTE_PRIMITIVE_ARRAY_TYPE_INFO)
+                .uid("kinesis-gsr-bytes");
 
-        // Sink: convert to DynamicRecord and write to Iceberg
+        // Sink: resolve schema, decode, convert, and write to Iceberg
         CatalogLoader catalogLoader = IcebergConfig.createCatalogLoader(config);
 
         AvroToDynamicRecordGenerator generator = new AvroToDynamicRecordGenerator(
-                database, partitionCandidates, branch.isEmpty() ? null : branch);
+                awsRegion, registryName, database, partitionCandidates,
+                branch.isEmpty() ? null : branch);
 
-        DynamicIcebergSink.forInput(events)
+        DynamicIcebergSink.forInput(eventBytes)
                 .generator(generator)
                 .catalogLoader(catalogLoader)
                 .immediateTableUpdate(true)
