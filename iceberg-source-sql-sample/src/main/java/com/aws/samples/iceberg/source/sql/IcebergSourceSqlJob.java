@@ -1,57 +1,42 @@
 package com.aws.samples.iceberg.source.sql;
 
-import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.aws.samples.iceberg.runtime.AppProperties;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Properties;
 
 /**
- * Iceberg Source SQL Job - Reads from Iceberg tables using Flink SQL and writes to Kinesis.
- * 
- * This sample demonstrates:
- * - Flink SQL for reading Iceberg tables
- * - SQL hints for streaming/batch configuration
- * - Branch and tag reading
- * - Metadata table queries ($snapshots, $history, $files)
- * - Writing to Kinesis using SQL connector
- * 
- * IMPORTANT: Streaming reads only work for APPEND-ONLY tables.
- * Tables with upserts (equality deletes) are NOT supported for streaming.
- * 
- * Configuration properties:
- * - iceberg.catalog.type: 'glue' or 's3tables'
- * - iceberg.database: Database/namespace name
- * - iceberg.table: Table name to read from
- * - iceberg.source.streaming: 'true' for streaming, 'false' for batch
- * - kinesis.sink.stream.arn: Kinesis stream ARN to write to
+ * Read an Iceberg table with Flink SQL and republish rows to Kinesis.
+ *
+ * <p>Features demonstrated: SQL-native Iceberg source configuration, streaming vs batch
+ * modes selected via {@code iceberg.source.streaming}, time-travel and branch/tag
+ * reads through SQL hints, and Kinesis as a SQL sink.
+ *
+ * <p><b>Important:</b> streaming reads only support append-only tables. Tables with
+ * equality deletes are not supported as streaming sources.
  */
 public class IcebergSourceSqlJob {
-    
+
     private static final Logger LOG = LoggerFactory.getLogger(IcebergSourceSqlJob.class);
-    
+
     public static void main(String[] args) throws Exception {
-        // Load configuration
-        Map<String, Properties> applicationProperties = loadApplicationProperties();
-        Properties flinkProps = applicationProperties.getOrDefault("FlinkApplicationProperties", new Properties());
-        
-        // Validate configuration
+        // Load properties up-front; we need the streaming flag before we create the env.
+        Properties flinkProps;
+        {
+            StreamExecutionEnvironment bootstrapEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+            flinkProps = AppProperties.load(bootstrapEnv);
+        }
         validateConfiguration(flinkProps);
-        
-        // Create execution environment with runtime mode set BEFORE creating TableEnvironment
-        boolean streaming = Boolean.parseBoolean(flinkProps.getProperty("iceberg.source.streaming", "true"));
+
+        boolean streaming = Boolean.parseBoolean(
+                flinkProps.getProperty("iceberg.source.streaming", "true"));
         StreamExecutionEnvironment env = createExecutionEnvironment(flinkProps, streaming);
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
-        
-        // Build and execute pipeline
+
         buildPipeline(tableEnv, flinkProps);
     }
     
@@ -306,47 +291,5 @@ public class IcebergSourceSqlJob {
         if (value == null || value.isEmpty()) {
             throw new IllegalArgumentException(message);
         }
-    }
-    
-    private static Map<String, Properties> loadApplicationProperties() throws IOException {
-        // Try to load from KinesisAnalyticsRuntime (AWS Managed Flink)
-        // Falls back to local properties file if running locally
-        Map<String, Properties> runtimeProps;
-        try {
-            runtimeProps = KinesisAnalyticsRuntime.getApplicationProperties();
-        } catch (Exception e) {
-            runtimeProps = new HashMap<>();
-        }
-        if (runtimeProps == null || runtimeProps.isEmpty()) {
-            LOG.info("No runtime properties from Managed Flink, loading local properties");
-            return loadLocalProperties();
-        }
-        LOG.info("Loaded runtime properties from Managed Flink");
-        return runtimeProps;
-    }
-    
-    private static Map<String, Properties> loadLocalProperties() throws IOException {
-        Map<String, Properties> appProperties = new HashMap<>();
-        
-        try (InputStream input = IcebergSourceSqlJob.class.getClassLoader()
-                .getResourceAsStream("flink-application-properties-dev.json")) {
-            if (input != null) {
-                ObjectMapper mapper = new ObjectMapper();
-                @SuppressWarnings("unchecked")
-                Map<String, Object>[] propertyGroups = mapper.readValue(input, Map[].class);
-                
-                for (Map<String, Object> group : propertyGroups) {
-                    String groupId = (String) group.get("PropertyGroupId");
-                    @SuppressWarnings("unchecked")
-                    Map<String, String> propertyMap = (Map<String, String>) group.get("PropertyMap");
-                    
-                    Properties props = new Properties();
-                    props.putAll(propertyMap);
-                    appProperties.put(groupId, props);
-                }
-            }
-        }
-        
-        return appProperties;
     }
 }

@@ -1,18 +1,17 @@
 package com.aws.samples.iceberg.datastream;
 
-import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import com.aws.samples.iceberg.config.IcebergConfig;
 import com.aws.samples.iceberg.model.OrderEvent;
+import com.aws.samples.iceberg.runtime.AppProperties;
+import com.aws.samples.iceberg.runtime.Checkpointing;
+import com.aws.samples.iceberg.runtime.FlinkEnvironments;
+import com.aws.samples.iceberg.runtime.KinesisSources;
 import com.aws.samples.iceberg.util.EventToRowDataConverter;
 import com.aws.samples.iceberg.util.OrderEventDeserializer;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kinesis.source.KinesisStreamsSource;
-import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.environment.CheckpointConfig;
-import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
@@ -47,7 +46,6 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 
 /**
  * DataStream API sample: reads {@link OrderEvent} from Kinesis and writes to an Iceberg
@@ -82,8 +80,6 @@ public final class DataStreamIcebergJob {
     private static final String WRITE_MODE = "write.mode";
     private static final String PRIMARY_KEY_COLUMNS = "primary.key.columns";
     private static final String TABLE_FORMAT_VERSION = "table.format.version";
-    private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE =
-            "flink-application-properties-dev.json";
 
     // Write-side tuning defaults.
     private static final String DEFAULT_TABLE_FORMAT_VERSION = "2";
@@ -94,7 +90,7 @@ public final class DataStreamIcebergJob {
     private static final String DEFAULT_AWS_REGION = "us-east-1";
     private static final String DEFAULT_CATALOG_TYPE = "glue";
     private static final long DEFAULT_TARGET_FILE_SIZE = 128L * 1024 * 1024; // 128 MB
-    private static final long DEFAULT_CHECKPOINT_INTERVAL_MS = 60_000L;
+    private static final int LOCAL_WEB_UI_PORT = 8081;
 
     // Operator uid constants — keep stable across releases.
     private static final String UID_KINESIS_SOURCE = "kinesis-source";
@@ -107,12 +103,14 @@ public final class DataStreamIcebergJob {
     public static void main(String[] args) throws Exception {
         LOG.info("Starting DataStream Iceberg Job");
 
-        StreamExecutionEnvironment env = createExecutionEnvironment();
-        Map<String, String> config = loadApplicationProperties(env);
+        StreamExecutionEnvironment env = FlinkEnvironments.getOrCreateLocal(LOCAL_WEB_UI_PORT);
+        Map<String, String> config = AppProperties.loadAsMap(env);
         validateConfiguration(config);
 
-        if (isLocal(env)) {
-            configureCheckpointing(env, config);
+        if (FlinkEnvironments.isLocal(env)) {
+            long interval = Long.parseLong(config.getOrDefault(
+                    CHECKPOINT_INTERVAL, Long.toString(Checkpointing.DEFAULT_INTERVAL_MS)));
+            Checkpointing.configureLocalDefaults(env, interval);
         } else {
             LOG.info("Running on AWS Managed Flink — checkpointing configured by the service");
         }
@@ -148,59 +146,8 @@ public final class DataStreamIcebergJob {
     }
 
     // ------------------------------------------------------------------------
-    // Environment / configuration
+    // Configuration validation
     // ------------------------------------------------------------------------
-
-    private static boolean isLocal(StreamExecutionEnvironment env) {
-        return env instanceof LocalStreamEnvironment;
-    }
-
-    private static StreamExecutionEnvironment createExecutionEnvironment() {
-        try {
-            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            if (isLocal(env)) {
-                Configuration config = new Configuration();
-                config.setString("rest.port", "8081");
-                config.setString("rest.bind-address", "localhost");
-                env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(config);
-                LOG.info("Local execution detected — Flink Web UI at http://localhost:8081");
-            }
-            return env;
-        } catch (Exception e) {
-            LOG.warn("Could not create environment with Web UI, falling back to default", e);
-            return StreamExecutionEnvironment.getExecutionEnvironment();
-        }
-    }
-
-    /**
-     * Load application properties from the Managed Flink runtime or a local JSON resource.
-     * Unknown keys are retained so we don't lose forward-compatible configuration.
-     */
-    private static Map<String, String> loadApplicationProperties(StreamExecutionEnvironment env)
-            throws Exception {
-        Map<String, Properties> allProps;
-        if (isLocal(env)) {
-            LOG.info("Loading configuration from local resource: {}", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
-            java.net.URL resource = DataStreamIcebergJob.class.getClassLoader()
-                    .getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE);
-            if (resource == null) {
-                LOG.warn("Local properties resource not found; using empty config");
-                allProps = new HashMap<>();
-            } else {
-                allProps = KinesisAnalyticsRuntime.getApplicationProperties(resource.getPath());
-            }
-        } else {
-            LOG.info("Loading configuration from Managed Flink runtime properties");
-            allProps = KinesisAnalyticsRuntime.getApplicationProperties();
-        }
-
-        Properties flinkProps = allProps.getOrDefault("FlinkApplicationProperties", new Properties());
-        Map<String, String> config = new HashMap<>();
-        for (String key : flinkProps.stringPropertyNames()) {
-            config.put(key, flinkProps.getProperty(key));
-        }
-        return config;
-    }
 
     private static void validateConfiguration(Map<String, String> config) {
         String streamArn = config.get(KINESIS_STREAM_ARN);
@@ -226,19 +173,6 @@ public final class DataStreamIcebergJob {
         }
     }
 
-    private static void configureCheckpointing(StreamExecutionEnvironment env, Map<String, String> config) {
-        long interval = Long.parseLong(
-                config.getOrDefault(CHECKPOINT_INTERVAL, Long.toString(DEFAULT_CHECKPOINT_INTERVAL_MS)));
-
-        env.enableCheckpointing(interval, CheckpointingMode.EXACTLY_ONCE);
-        CheckpointConfig cp = env.getCheckpointConfig();
-        cp.setMinPauseBetweenCheckpoints(30_000);
-        cp.setCheckpointTimeout(600_000);
-        cp.setMaxConcurrentCheckpoints(1);
-        cp.setTolerableCheckpointFailureNumber(3);
-        LOG.info("Local checkpointing configured: interval={}ms, mode=EXACTLY_ONCE", interval);
-    }
-
     // ------------------------------------------------------------------------
     // Sources
     // ------------------------------------------------------------------------
@@ -250,17 +184,7 @@ public final class DataStreamIcebergJob {
 
         LOG.info("Kinesis source: stream={}, region={}", streamArn, region);
 
-        Configuration sourceConfig = new Configuration();
-        sourceConfig.setString("aws.region", region);
-        sourceConfig.setString("flink.stream.initpos", "LATEST");
-        sourceConfig.setString("flink.shard.discovery.intervalmillis", "10000");
-        sourceConfig.setString("flink.shard.getrecords.maxrecordcount", "10000");
-
-        return KinesisStreamsSource.<OrderEvent>builder()
-                .setStreamArn(streamArn)
-                .setDeserializationSchema(new OrderEventDeserializer())
-                .setSourceConfig(sourceConfig)
-                .build();
+        return KinesisSources.create(streamArn, region, new OrderEventDeserializer());
     }
 
     private static WatermarkStrategy<OrderEvent> createWatermarkStrategy() {

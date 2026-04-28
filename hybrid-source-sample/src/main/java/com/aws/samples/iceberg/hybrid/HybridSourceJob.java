@@ -1,8 +1,9 @@
 package com.aws.samples.iceberg.hybrid;
 
-import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
+import com.aws.samples.iceberg.runtime.AppProperties;
+import com.aws.samples.iceberg.runtime.Checkpointing;
+import com.aws.samples.iceberg.runtime.FlinkEnvironments;
 import com.aws.samples.iceberg.util.RowDataToJsonMapper;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -23,11 +24,7 @@ import org.apache.iceberg.flink.source.IcebergSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -61,23 +58,24 @@ import java.util.Properties;
  * - kinesis.sink.stream.arn: Kinesis stream ARN to write processed data
  */
 public class HybridSourceJob {
-    
+
     private static final Logger LOG = LoggerFactory.getLogger(HybridSourceJob.class);
-    
+    private static final int LOCAL_WEB_UI_PORT = 8086;
+
     public static void main(String[] args) throws Exception {
-        // Load configuration
-        Map<String, Properties> applicationProperties = loadApplicationProperties();
-        Properties flinkProps = applicationProperties.getOrDefault("FlinkApplicationProperties", new Properties());
-        
-        // Validate configuration
+        StreamExecutionEnvironment env = FlinkEnvironments.getOrCreateLocal(LOCAL_WEB_UI_PORT);
+        Properties flinkProps = AppProperties.load(env);
         validateConfiguration(flinkProps);
-        
-        // Create execution environment
-        StreamExecutionEnvironment env = createExecutionEnvironment(flinkProps);
+
+        if (FlinkEnvironments.isLocal(env)) {
+            long interval = Long.parseLong(flinkProps.getProperty(
+                    "checkpoint.interval.ms", Long.toString(Checkpointing.DEFAULT_INTERVAL_MS)));
+            Checkpointing.configureLocalDefaults(env, interval);
+        }
+
         env.disableOperatorChaining();
-        // Build and execute pipeline
         buildPipeline(env, flinkProps);
-        
+
         env.execute("HybridSource: Iceberg Bootstrap -> Kinesis Streaming");
     }
     
@@ -181,7 +179,7 @@ public class HybridSourceJob {
     private static KinesisStreamsSink<String> buildKinesisSink(String streamArn, String region) {
         Properties sinkProps = new Properties();
         sinkProps.setProperty(AWSConfigConstants.AWS_REGION, region);
-        
+
         return KinesisStreamsSink.<String>builder()
                 .setStreamArn(streamArn)
                 .setSerializationSchema(new SimpleStringSchema())
@@ -189,21 +187,7 @@ public class HybridSourceJob {
                 .setKinesisClientProperties(sinkProps)
                 .build();
     }
-    
-    private static StreamExecutionEnvironment createExecutionEnvironment(Properties props) {
-        Configuration config = new Configuration();
-        
-        // Note: RestOptions.PORT is NOT set here because Managed Flink rejects it.
-        // For local dev, pass -Drest.port=8086 as a JVM argument if needed.
-        
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
-        
-        long checkpointInterval = Long.parseLong(props.getProperty("checkpoint.interval.ms", "60000"));
-        env.enableCheckpointing(checkpointInterval);
-        
-        return env;
-    }
-    
+
     private static void validateConfiguration(Properties props) {
         String catalogType = props.getProperty("iceberg.catalog.type", "glue");
         
@@ -224,47 +208,5 @@ public class HybridSourceJob {
         if (value == null || value.isEmpty()) {
             throw new IllegalArgumentException(message);
         }
-    }
-    
-    private static Map<String, Properties> loadApplicationProperties() throws IOException {
-        // Try to load from KinesisAnalyticsRuntime (AWS Managed Flink)
-        // Falls back to local properties file if running locally
-        Map<String, Properties> runtimeProps;
-        try {
-            runtimeProps = KinesisAnalyticsRuntime.getApplicationProperties();
-        } catch (Exception e) {
-            runtimeProps = new HashMap<>();
-        }
-        if (runtimeProps == null || runtimeProps.isEmpty()) {
-            LOG.info("No runtime properties from Managed Flink, loading local properties");
-            return loadLocalProperties();
-        }
-        LOG.info("Loaded runtime properties from Managed Flink");
-        return runtimeProps;
-    }
-    
-    private static Map<String, Properties> loadLocalProperties() throws IOException {
-        Map<String, Properties> appProperties = new HashMap<>();
-        
-        try (InputStream input = HybridSourceJob.class.getClassLoader()
-                .getResourceAsStream("flink-application-properties-dev.json")) {
-            if (input != null) {
-                ObjectMapper mapper = new ObjectMapper();
-                @SuppressWarnings("unchecked")
-                Map<String, Object>[] propertyGroups = mapper.readValue(input, Map[].class);
-                
-                for (Map<String, Object> group : propertyGroups) {
-                    String groupId = (String) group.get("PropertyGroupId");
-                    @SuppressWarnings("unchecked")
-                    Map<String, String> propertyMap = (Map<String, String>) group.get("PropertyMap");
-                    
-                    Properties props = new Properties();
-                    props.putAll(propertyMap);
-                    appProperties.put(groupId, props);
-                }
-            }
-        }
-        
-        return appProperties;
     }
 }
