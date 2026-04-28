@@ -100,6 +100,8 @@ public class DynamicAvroSinkJob {
                 .cacheMaxSize(cacheMaxSize)
                 .cacheRefreshMs(cacheRefreshMs)
                 .set("write.format.default", "parquet")
+                // v2 is the right choice for Flink writers in Iceberg 1.10:
+                // the sink emits equality + positional delete files, not DVs.
                 .set("format-version", "2")
                 .set("write.target-file-size-bytes", "134217728")
                 .set("write.parquet.compression-codec", "snappy")

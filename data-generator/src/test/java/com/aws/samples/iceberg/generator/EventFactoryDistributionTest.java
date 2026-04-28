@@ -60,17 +60,22 @@ class EventFactoryDistributionTest {
             actualDistribution.put(entry.getKey(), (double) entry.getValue() / sampleSize);
         }
         
-        // Verify distribution within tolerance (±5%)
-        double tolerance = 0.05;
+        // Verify distribution within tolerance. Tolerance scales with sampleSize since
+        // smaller samples have larger expected statistical deviation. For sampleSize=1000
+        // with p=0.36, the 3σ deviation is ~4.5%, so we use max(5%, 3σ) to keep the test
+        // from becoming flaky while still catching real distribution bugs.
+        double tolerance = Math.max(0.05,
+                3.0 * Math.sqrt(0.25 / sampleSize));
         for (String eventType : distribution.keySet()) {
             double expected = distribution.get(eventType);
             double actual = actualDistribution.get(eventType);
             double difference = Math.abs(expected - actual);
-            
+
             if (difference > tolerance) {
                 throw new AssertionError(
-                    String.format("Distribution mismatch for %s: expected %.3f, got %.3f (diff: %.3f > %.3f)",
-                        eventType, expected, actual, difference, tolerance));
+                    String.format("Distribution mismatch for %s: expected %.3f, got %.3f "
+                            + "(diff: %.3f > tolerance %.3f, sampleSize %d)",
+                        eventType, expected, actual, difference, tolerance, sampleSize));
             }
         }
     }

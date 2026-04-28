@@ -39,7 +39,6 @@
         <kafka.version>3.6.0</kafka.version>
         <jackson.version>2.18.6</jackson.version>
         <slf4j.version>1.7.36</slf4j.version>
-        <avro.version>1.11.3</avro.version>
         <glue.schema.registry.version>1.1.27</glue.schema.registry.version>
     </properties>
 
@@ -136,11 +135,11 @@
                 <version>${flink.version}</version>
             </dependency>
 
-            <!-- Apache Avro -->
+            <!-- Apache Avro (pinned to fix CVE-2024-47561; transitive from hadoop/iceberg) -->
             <dependency>
                 <groupId>org.apache.avro</groupId>
                 <artifactId>avro</artifactId>
-                <version>${avro.version}</version>
+                <version>1.11.4</version>
             </dependency>
 
             <!-- AWS Glue Schema Registry SerDe (Avro + Flink) -->
@@ -327,13 +326,6 @@
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson.version}</version>
             </dependency>
-
-            <!-- Avro - pinned to fix CVE-2024-47561 (transitive from hadoop/iceberg) -->
-            <dependency>
-                <groupId>org.apache.avro</groupId>
-                <artifactId>avro</artifactId>
-                <version>1.11.4</version>
-            </dependency>
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-core</artifactId>
@@ -411,7 +403,7 @@
                 <plugin>
                     <groupId>com.github.spotbugs</groupId>
                     <artifactId>spotbugs-maven-plugin</artifactId>
-                    <version>4.8.3.1</version>
+                    <version>4.8.6.6</version>
                     <configuration>
                         <effort>Max</effort>
                         <threshold>Medium</threshold>

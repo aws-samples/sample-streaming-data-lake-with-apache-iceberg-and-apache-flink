@@ -1,9 +1,8 @@
 package com.aws.samples.iceberg.source;
 
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
+import com.aws.samples.iceberg.util.RowDataToJsonMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.configuration.Configuration;
@@ -52,7 +51,6 @@ import java.util.Properties;
 public class IcebergSourceJob {
     
     private static final Logger LOG = LoggerFactory.getLogger(IcebergSourceJob.class);
-    private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
     
     public static void main(String[] args) throws Exception {
         // Load configuration
@@ -110,18 +108,19 @@ public class IcebergSourceJob {
                 watermarkStrategy,
                 "Iceberg Source: " + tableName,
                 org.apache.flink.api.common.typeinfo.TypeInformation.of(RowData.class)
-        );
+        ).uid("iceberg-source");
         
         // Convert RowData to JSON strings
         DataStream<String> jsonStream = sourceStream
                 .map(new RowDataToJsonMapper(icebergSchema))
+                .uid("rowdata-to-json")
                 .name("RowData to JSON");
 
         // Write to Kinesis
         String sinkStreamArn = props.getProperty("kinesis.sink.stream.arn");
         KinesisStreamsSink<String> kinesisSink = buildKinesisSink(sinkStreamArn, region);
         
-        jsonStream.sinkTo(kinesisSink).name("Kinesis Sink");
+        jsonStream.sinkTo(kinesisSink).uid("kinesis-sink").name("Kinesis Sink");
         
         LOG.info("Pipeline built successfully");
     }
@@ -285,6 +284,7 @@ public class IcebergSourceJob {
                 .getResourceAsStream("flink-application-properties-dev.json")) {
             if (input != null) {
                 ObjectMapper mapper = new ObjectMapper();
+                @SuppressWarnings("unchecked")
                 Map<String, Object>[] propertyGroups = mapper.readValue(input, Map[].class);
                 
                 for (Map<String, Object> group : propertyGroups) {
@@ -300,19 +300,5 @@ public class IcebergSourceJob {
         }
         
         return appProperties;
-    }
-    
-    private static boolean isLocalDevelopment() {
-        // Check if running locally vs AWS Managed Flink.
-        // Managed Flink sets AWS_EXECUTION_ENV.
-        if (System.getenv("IS_LOCAL") != null) return true;
-        return System.getenv("AWS_EXECUTION_ENV") == null;
-    }
-    
-    private static ObjectMapper createObjectMapper() {
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.registerModule(new JavaTimeModule());
-        mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        return mapper;
     }
 }

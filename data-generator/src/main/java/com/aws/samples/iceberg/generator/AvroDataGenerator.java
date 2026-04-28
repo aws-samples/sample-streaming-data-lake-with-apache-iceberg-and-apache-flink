@@ -80,7 +80,7 @@ public class AvroDataGenerator {
         configs.put(AWSSchemaRegistryConstants.REGISTRY_NAME, registryName);
 
         this.gsrFacade = GlueSchemaRegistrySerializationFacade.builder()
-                .credentialProvider(DefaultCredentialsProvider.create())
+                .credentialProvider(DefaultCredentialsProvider.builder().build())
                 .configs(configs)
                 .build();
     }

@@ -105,7 +105,8 @@ public class EventFactory {
         
         String orderId = "ORD-" + UUID.randomUUID().toString().substring(0, 8);
         String customerId = "CUST-" + random.nextInt(10000);
-        BigDecimal amount = BigDecimal.valueOf(10 + random.nextDouble() * 990).setScale(2, BigDecimal.ROUND_HALF_UP);
+        BigDecimal amount = BigDecimal.valueOf(10 + random.nextDouble() * 990)
+                .setScale(2, java.math.RoundingMode.HALF_UP);
         String currency = randomElement(CURRENCIES);
         String status = randomElement(ORDER_STATUSES);
         

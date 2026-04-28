@@ -11,6 +11,7 @@
 
 # Blog post (internal draft)
 BLOG_POST.md
+ignore-me/
 
 # Maven
 target/

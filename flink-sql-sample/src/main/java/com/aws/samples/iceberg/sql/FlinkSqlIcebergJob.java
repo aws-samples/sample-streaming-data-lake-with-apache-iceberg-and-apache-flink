@@ -1,7 +1,7 @@
 package com.aws.samples.iceberg.sql;
 
 import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
-import org.apache.flink.streaming.api.CheckpointingMode;
+import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
@@ -131,10 +131,9 @@ public class FlinkSqlIcebergJob {
         // Configure checkpointing for local development only
         // AWS Managed Flink configures checkpointing automatically
         if (isLocal(env)) {
-            env.enableCheckpointing(60000);
-            env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
-            env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30000);
-            env.getCheckpointConfig().setCheckpointTimeout(600000);
+            env.enableCheckpointing(60_000, CheckpointingMode.EXACTLY_ONCE);
+            env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30_000);
+            env.getCheckpointConfig().setCheckpointTimeout(600_000);
             env.getCheckpointConfig().setMaxConcurrentCheckpoints(1);
             LOG.info("Checkpointing configured for local development: interval=60s, mode=EXACTLY_ONCE");
         } else {

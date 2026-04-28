@@ -378,6 +378,7 @@ export class IcebergFlinkStack extends cdk.Stack {
       // write.mode can be overridden via context (default 'upsert')
       // Set to 'append' to produce data readable by iceberg-source streaming mode
       const writeMode = this.node.tryGetContext('writeMode') || 'upsert';
+      const tableFormatVersion = this.node.tryGetContext('tableFormatVersion') || '2';
       const props = {
         ...baseProps,
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
@@ -386,6 +387,7 @@ export class IcebergFlinkStack extends cdk.Stack {
         'enable.maintenance': enableMaintenance.toString(),
         'write.mode': writeMode,
         'primary.key.columns': 'event_id,event_date,region',
+        'table.format.version': tableFormatVersion,
       };
       if (enableMaintenance && resources.dbEndpoint && resources.dbSecretArn) {
         return {

@@ -4,8 +4,6 @@ import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.table.api.EnvironmentSettings;
-import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -334,6 +332,7 @@ public class IcebergSourceSqlJob {
                 .getResourceAsStream("flink-application-properties-dev.json")) {
             if (input != null) {
                 ObjectMapper mapper = new ObjectMapper();
+                @SuppressWarnings("unchecked")
                 Map<String, Object>[] propertyGroups = mapper.readValue(input, Map[].class);
                 
                 for (Map<String, Object> group : propertyGroups) {
@@ -349,12 +348,5 @@ public class IcebergSourceSqlJob {
         }
         
         return appProperties;
-    }
-    
-    private static boolean isLocalDevelopment() {
-        // Check if running locally vs AWS Managed Flink.
-        // Managed Flink sets AWS_EXECUTION_ENV.
-        if (System.getenv("IS_LOCAL") != null) return true;
-        return System.getenv("AWS_EXECUTION_ENV") == null;
     }
 }

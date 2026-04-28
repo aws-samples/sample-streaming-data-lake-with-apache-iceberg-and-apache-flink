@@ -59,7 +59,7 @@ public class AvroSchemaEvolutionTester {
         configs.put(AWSSchemaRegistryConstants.REGISTRY_NAME, registryName);
 
         GlueSchemaRegistrySerializationFacade facade = GlueSchemaRegistrySerializationFacade.builder()
-                .credentialProvider(DefaultCredentialsProvider.create())
+                .credentialProvider(DefaultCredentialsProvider.builder().build())
                 .configs(configs)
                 .build();
 

@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kinesis.source.KinesisStreamsSource;
-import org.apache.flink.streaming.api.CheckpointingMode;
+import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
@@ -149,12 +149,11 @@ public class DynamicSinkJob {
         
         LOG.info("Configuring checkpointing for local development");
         
-        env.enableCheckpointing(checkpointInterval);
-        
+        env.enableCheckpointing(checkpointInterval, CheckpointingMode.EXACTLY_ONCE);
+
         CheckpointConfig checkpointConfig = env.getCheckpointConfig();
-        checkpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
-        checkpointConfig.setMinPauseBetweenCheckpoints(30000);
-        checkpointConfig.setCheckpointTimeout(600000);
+        checkpointConfig.setMinPauseBetweenCheckpoints(30_000);
+        checkpointConfig.setCheckpointTimeout(600_000);
         checkpointConfig.setMaxConcurrentCheckpoints(1);
         checkpointConfig.setTolerableCheckpointFailureNumber(3);
         
@@ -254,7 +253,11 @@ public class DynamicSinkJob {
             .cacheMaxSize(cacheMaxSize)
             .cacheRefreshMs(cacheRefreshMs)
             .set("write.format.default", "parquet")
-            .set("format-version", "3")
+            // Use v2 table format. The Flink 1.10 Iceberg sink writes equality
+            // and positional delete files (never deletion vectors), so v3 on the
+            // write path does not add value today. V3 + DVs come from readers
+            // (Athena, Spark) and from compaction (RewriteDataFiles).
+            .set("format-version", "2")
             .set("write.target-file-size-bytes", "134217728")
             .set("write.parquet.compression-codec", "snappy");
         

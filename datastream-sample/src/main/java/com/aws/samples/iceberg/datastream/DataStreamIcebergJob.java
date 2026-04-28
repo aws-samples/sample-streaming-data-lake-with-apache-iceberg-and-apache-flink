@@ -1,28 +1,43 @@
 package com.aws.samples.iceberg.datastream;
 
+import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import com.aws.samples.iceberg.config.IcebergConfig;
 import com.aws.samples.iceberg.model.OrderEvent;
 import com.aws.samples.iceberg.util.EventToRowDataConverter;
 import com.aws.samples.iceberg.util.OrderEventDeserializer;
-import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kinesis.source.KinesisStreamsSource;
-import org.apache.flink.streaming.api.CheckpointingMode;
+import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.types.logical.*;
-import org.apache.iceberg.CatalogUtil;
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.types.logical.DateType;
+import org.apache.flink.table.types.logical.DecimalType;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.table.types.logical.VarCharType;
+import org.apache.iceberg.DistributionMode;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.flink.CatalogLoader;
 import org.apache.iceberg.flink.TableLoader;
+import org.apache.iceberg.flink.maintenance.api.DeleteOrphanFiles;
+import org.apache.iceberg.flink.maintenance.api.ExpireSnapshots;
+import org.apache.iceberg.flink.maintenance.api.JdbcLockFactory;
+import org.apache.iceberg.flink.maintenance.api.RewriteDataFiles;
+import org.apache.iceberg.flink.maintenance.api.TableMaintenance;
+import org.apache.iceberg.flink.maintenance.api.TriggerLockFactory;
 import org.apache.iceberg.flink.sink.IcebergSink;
-import org.apache.iceberg.flink.maintenance.api.*;
 import org.apache.iceberg.types.Types;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,632 +50,439 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * DataStream API sample demonstrating IcebergSink (SinkV2) with Apache Iceberg 1.10.
- * 
- * This job reads OrderEvent data from a Kinesis stream and writes to an Iceberg table
- * using the new IcebergSink (SinkV2-based) with support for:
- * - Table format v3 with delete vectors
- * - Upsert mode with equality deletes
- * - Branch writes for staging data
- * - Metrics for monitoring
- * 
- * Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
+ * DataStream API sample: reads {@link OrderEvent} from Kinesis and writes to an Iceberg
+ * table using the SinkV2-based {@link IcebergSink}, optionally with in-job table
+ * maintenance coordinated by a JDBC lock.
+ *
+ * <p>Every operator is given an explicit {@code uid} and {@code name} so that checkpoint
+ * state can survive job-graph changes — see the
+ * <a href="https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/production_ready/">
+ * Flink Production Readiness</a> guide.
+ *
+ * <p>Configuration is passed through {@code FlinkApplicationProperties} on Managed Flink
+ * or through the equivalent local JSON resource when run from an IDE.
  */
-public class DataStreamIcebergJob {
-    
+public final class DataStreamIcebergJob {
+
     private static final Logger LOG = LoggerFactory.getLogger(DataStreamIcebergJob.class);
-    
-    // Configuration keys
+
+    // Configuration keys (externalised so CDK / local config files stay in sync).
     private static final String KINESIS_STREAM_ARN = "kinesis.stream.arn";
     private static final String KINESIS_REGION = "kinesis.region";
-    private static final String ICEBERG_CATALOG_NAME = "iceberg.catalog.name";
     private static final String ICEBERG_CATALOG_TYPE = "iceberg.catalog.type";
     private static final String ICEBERG_DATABASE = "iceberg.database";
     private static final String ICEBERG_TABLE = "iceberg.table";
-    private static final String ICEBERG_WAREHOUSE = "iceberg.warehouse";
-    private static final String S3TABLES_BUCKET_ARN = "s3tables.bucket.arn";
     private static final String AWS_REGION = "aws.region";
     private static final String CHECKPOINT_INTERVAL = "checkpoint.interval.ms";
-    private static final String ICEBERG_BRANCH = "iceberg.branch";  // Optional branch for staging writes
+    private static final String ICEBERG_BRANCH = "iceberg.branch";
     private static final String ENABLE_MAINTENANCE = "enable.maintenance";
     private static final String RDS_JDBC_URL = "rds.jdbc.url";
     private static final String RDS_USER = "rds.user";
     private static final String RDS_PASSWORD = "rds.password";
-    private static final String WRITE_MODE = "write.mode";  // "append" or "upsert" (default: upsert)
-    private static final String PRIMARY_KEY_COLUMNS = "primary.key.columns";  // Comma-separated list for upsert mode
-    private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE = "flink-application-properties-dev.json";
-    
-    /**
-     * Check if running in local execution mode.
-     */
-    private static boolean isLocal(StreamExecutionEnvironment env) {
-        return env instanceof LocalStreamEnvironment;
-    }
-    
-    /**
-     * Load application properties from Amazon Managed Service for Apache Flink runtime
-     * or from local properties file when running locally.
-     */
-    private static Map<String, String> loadApplicationProperties(StreamExecutionEnvironment env) throws Exception {
-        Map<String, String> config = new HashMap<>();
-        
-        if (isLocal(env)) {
-            LOG.info("Loading configuration from local properties file: {}", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
-            // Load from local properties file for local development
+    private static final String WRITE_MODE = "write.mode";
+    private static final String PRIMARY_KEY_COLUMNS = "primary.key.columns";
+    private static final String TABLE_FORMAT_VERSION = "table.format.version";
+    private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE =
+            "flink-application-properties-dev.json";
 
-                Map<String,Properties> props = new HashMap<>();
-//            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
-//                DataStreamIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
-//            );
-            Properties flinkProps = props.getOrDefault("FlinkApplicationProperties", new Properties());
+    // Write-side tuning defaults.
+    private static final String DEFAULT_TABLE_FORMAT_VERSION = "2";
+    private static final String DEFAULT_WRITE_MODE = "upsert";
+    private static final String DEFAULT_PK_COLUMNS = "event_id,event_date,region";
+    private static final String DEFAULT_DATABASE = "iceberg_samples";
+    private static final String DEFAULT_TABLE = "orders";
+    private static final String DEFAULT_AWS_REGION = "us-east-1";
+    private static final String DEFAULT_CATALOG_TYPE = "glue";
+    private static final long DEFAULT_TARGET_FILE_SIZE = 128L * 1024 * 1024; // 128 MB
+    private static final long DEFAULT_CHECKPOINT_INTERVAL_MS = 60_000L;
 
-            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source"));
-            config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-west-1"));
-            config.put(ICEBERG_CATALOG_NAME, flinkProps.getProperty("iceberg.catalog.name", "glue_catalog"));
-            config.put(ICEBERG_CATALOG_TYPE, flinkProps.getProperty("iceberg.catalog.type", "glue"));
-            config.put(ICEBERG_DATABASE, flinkProps.getProperty("iceberg.database", "iceberg_samples"));
-            config.put(ICEBERG_TABLE, flinkProps.getProperty("iceberg.table", "orders"));
-            config.put(ICEBERG_WAREHOUSE, flinkProps.getProperty("iceberg.warehouse", "s3://iceberg-us-west-1-985539754032/warehouse/"));
-            config.put(S3TABLES_BUCKET_ARN, flinkProps.getProperty("s3tables.bucket.arn", ""));
-            config.put(AWS_REGION, flinkProps.getProperty("aws.region", "us-east-1"));
-            config.put(CHECKPOINT_INTERVAL, flinkProps.getProperty("checkpoint.interval.ms", "60000"));
-            config.put(ICEBERG_BRANCH, flinkProps.getProperty("iceberg.branch", ""));
-            config.put(ENABLE_MAINTENANCE, flinkProps.getProperty("enable.maintenance", "false"));
-            config.put(RDS_JDBC_URL, flinkProps.getProperty("rds.jdbc.url", ""));
-            config.put(RDS_USER, flinkProps.getProperty("rds.user", ""));
-            config.put(RDS_PASSWORD, flinkProps.getProperty("rds.password", ""));
-            config.put(WRITE_MODE, flinkProps.getProperty("write.mode", "upsert"));
-            config.put(PRIMARY_KEY_COLUMNS, flinkProps.getProperty("primary.key.columns", "event_id,event_date,region"));
-        } else {
-            LOG.info("Loading configuration from Amazon Managed Service for Apache Flink runtime properties");
-            // Load from Kinesis Analytics Runtime properties for MSF deployment
-            Map<String, Properties> applicationProperties = KinesisAnalyticsRuntime.getApplicationProperties();
-            
-            Properties flinkProps = applicationProperties.getOrDefault("FlinkApplicationProperties", new Properties());
-            
-            config.put(KINESIS_STREAM_ARN, flinkProps.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source"));
-            config.put(KINESIS_REGION, flinkProps.getProperty("kinesis.region", "us-east-1"));
-            config.put(ICEBERG_CATALOG_NAME, flinkProps.getProperty("iceberg.catalog.name", "glue_catalog"));
-            config.put(ICEBERG_CATALOG_TYPE, flinkProps.getProperty("iceberg.catalog.type", "glue"));
-            config.put(ICEBERG_DATABASE, flinkProps.getProperty("iceberg.database", "iceberg_samples"));
-            config.put(ICEBERG_TABLE, flinkProps.getProperty("iceberg.table", "orders"));
-            config.put(ICEBERG_WAREHOUSE, flinkProps.getProperty("iceberg.warehouse", ""));
-            config.put(S3TABLES_BUCKET_ARN, flinkProps.getProperty("s3tables.bucket.arn", ""));
-            config.put(AWS_REGION, flinkProps.getProperty("aws.region", "us-east-1"));
-            config.put(CHECKPOINT_INTERVAL, flinkProps.getProperty("checkpoint.interval.ms", "60000"));
-            config.put(ICEBERG_BRANCH, flinkProps.getProperty("iceberg.branch", ""));
-            config.put(ENABLE_MAINTENANCE, flinkProps.getProperty("enable.maintenance", "false"));
-            config.put(RDS_JDBC_URL, flinkProps.getProperty("rds.jdbc.url", ""));
-            config.put(RDS_USER, flinkProps.getProperty("rds.user", ""));
-            config.put(RDS_PASSWORD, flinkProps.getProperty("rds.password", ""));
-            config.put(WRITE_MODE, flinkProps.getProperty("write.mode", "upsert"));
-            config.put(PRIMARY_KEY_COLUMNS, flinkProps.getProperty("primary.key.columns", "event_id,event_date,region"));
-        }
-        
-        LOG.info("Configuration loaded successfully");
-        return config;
+    // Operator uid constants — keep stable across releases.
+    private static final String UID_KINESIS_SOURCE = "kinesis-source";
+    private static final String UID_TO_ROWDATA = "event-to-rowdata";
+
+    private DataStreamIcebergJob() {
+        // utility-style main class; not intended to be instantiated.
     }
-    
-    /**
-     * Create execution environment with Web UI for local development.
-     */
-    private static StreamExecutionEnvironment createExecutionEnvironment() {
-        // Try to create local environment with Web UI
-        // If flink-runtime-web is on classpath, this will enable the UI
-        try {
-            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            if (isLocal(env)) {
-                // Recreate with Web UI enabled
-                org.apache.flink.configuration.Configuration config = new org.apache.flink.configuration.Configuration();
-                config.setString("rest.port", "8081");
-                config.setString("rest.bind-address", "localhost");
-                env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(config);
-                LOG.info("Local execution detected - Flink Web UI available at http://localhost:8081");
-            }
-            return env;
-        } catch (Exception e) {
-            LOG.warn("Could not create environment with Web UI, falling back to standard environment", e);
-            return StreamExecutionEnvironment.getExecutionEnvironment();
-        }
-    }
-    
+
     public static void main(String[] args) throws Exception {
         LOG.info("Starting DataStream Iceberg Job");
-        
-        // Set up Flink execution environment with Web UI for local dev
+
         StreamExecutionEnvironment env = createExecutionEnvironment();
-        
-        // Load configuration from MSF runtime properties or environment variables
         Map<String, String> config = loadApplicationProperties(env);
-        
-        // Validate required configuration
         validateConfiguration(config);
-        
-        // Configure checkpointing for local development only
-        // AWS Managed Flink configures checkpointing automatically
+
         if (isLocal(env)) {
             configureCheckpointing(env, config);
         } else {
-            LOG.info("Running on AWS Managed Flink - checkpointing configured by the service");
+            LOG.info("Running on AWS Managed Flink — checkpointing configured by the service");
         }
-        
-        // Create Kinesis source
-        KinesisStreamsSource<OrderEvent> kinesisSource = createKinesisSource(config);
-        
-        // Read from Kinesis with watermark strategy
-        // Explicitly provide type information to avoid type erasure issues on Managed Flink
+
+        // Source: Kinesis -> OrderEvent
         DataStream<OrderEvent> orderEvents = env.fromSource(
-            kinesisSource,
-            createWatermarkStrategy(),
-            "Kinesis Source",
-            org.apache.flink.api.common.typeinfo.TypeInformation.of(OrderEvent.class)
-        )
-        .uid("kinesis-source")
-        .name("Read from Kinesis");
-        
-        // Convert OrderEvent to RowData for Iceberg
-        // Provide explicit RowData type information to avoid Kryo fallback serialization
-        // which fails on Java 17+ due to module access restrictions
-        RowType rowType = RowType.of(
-            new LogicalType[]{
-                new VarCharType(VarCharType.MAX_LENGTH),           // event_id
-                new TimestampType(6),                              // event_time
-                new VarCharType(VarCharType.MAX_LENGTH),           // event_type
-                new VarCharType(VarCharType.MAX_LENGTH),           // region
-                new DateType(),                                     // event_date
-                new VarCharType(VarCharType.MAX_LENGTH),           // order_id
-                new VarCharType(VarCharType.MAX_LENGTH),           // customer_id
-                new DecimalType(18, 2),                            // amount
-                new VarCharType(VarCharType.MAX_LENGTH),           // currency
-                new VarCharType(VarCharType.MAX_LENGTH),           // status
-                new MapType(new VarCharType(VarCharType.MAX_LENGTH),
-                            new VarCharType(VarCharType.MAX_LENGTH))  // metadata
-            },
-            new String[]{
-                "event_id", "event_time", "event_type", "region", "event_date",
-                "order_id", "customer_id", "amount", "currency", "status", "metadata"
-            }
-        );
+                        createKinesisSource(config),
+                        createWatermarkStrategy(),
+                        "Kinesis Source (OrderEvent)",
+                        TypeInformation.of(OrderEvent.class))
+                .uid(UID_KINESIS_SOURCE)
+                .name("Read from Kinesis");
+
+        // Convert: OrderEvent -> RowData (explicit type info avoids Kryo fallback on JDK 17+).
         DataStream<RowData> rowDataStream = orderEvents
-            .map(EventToRowDataConverter::convertOrderEvent)
-            .returns(org.apache.flink.table.runtime.typeutils.InternalTypeInfo.of(rowType))
-            .uid("event-to-rowdata")
-            .name("Convert to RowData");
-        
-        // Create Iceberg catalog and table loaders
-        CatalogLoader catalogLoader = createCatalogLoader(config);
-        
-        // Ensure table exists, create if necessary
+                .map(EventToRowDataConverter::convertOrderEvent)
+                .returns(InternalTypeInfo.of(orderEventRowType()))
+                .uid(UID_TO_ROWDATA)
+                .name("Convert OrderEvent to RowData");
+
+        CatalogLoader catalogLoader = IcebergConfig.createCatalogLoader(config);
         ensureTableExists(catalogLoader, config);
-        
-        TableLoader tableLoader = createTableLoader(catalogLoader, config);
-        
-        // Configure and add IcebergSink (SinkV2) with upsert mode
+        TableLoader tableLoader = TableLoader.fromCatalog(
+                catalogLoader,
+                TableIdentifier.of(
+                        config.getOrDefault(ICEBERG_DATABASE, DEFAULT_DATABASE),
+                        config.getOrDefault(ICEBERG_TABLE, DEFAULT_TABLE)));
+
         configureIcebergSink(rowDataStream, tableLoader, config, env);
-        
-        LOG.info("DataStream Iceberg Job configured successfully");
-        
-        // Add shutdown hook for graceful termination
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOG.info("Shutdown signal received, cleaning up resources...");
-        }));
-        
-        // Execute the job
+
+        LOG.info("Executing DataStream Iceberg Job");
+        env.execute("DataStream Iceberg Job - Orders");
+    }
+
+    // ------------------------------------------------------------------------
+    // Environment / configuration
+    // ------------------------------------------------------------------------
+
+    private static boolean isLocal(StreamExecutionEnvironment env) {
+        return env instanceof LocalStreamEnvironment;
+    }
+
+    private static StreamExecutionEnvironment createExecutionEnvironment() {
         try {
-            env.execute("DataStream Iceberg Job - Orders");
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            if (isLocal(env)) {
+                Configuration config = new Configuration();
+                config.setString("rest.port", "8081");
+                config.setString("rest.bind-address", "localhost");
+                env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(config);
+                LOG.info("Local execution detected — Flink Web UI at http://localhost:8081");
+            }
+            return env;
         } catch (Exception e) {
-            LOG.error("Job execution failed", e);
-            throw e;
+            LOG.warn("Could not create environment with Web UI, falling back to default", e);
+            return StreamExecutionEnvironment.getExecutionEnvironment();
         }
     }
-    
+
     /**
-     * Validate required configuration parameters.
+     * Load application properties from the Managed Flink runtime or a local JSON resource.
+     * Unknown keys are retained so we don't lose forward-compatible configuration.
      */
+    private static Map<String, String> loadApplicationProperties(StreamExecutionEnvironment env)
+            throws Exception {
+        Map<String, Properties> allProps;
+        if (isLocal(env)) {
+            LOG.info("Loading configuration from local resource: {}", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
+            java.net.URL resource = DataStreamIcebergJob.class.getClassLoader()
+                    .getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE);
+            if (resource == null) {
+                LOG.warn("Local properties resource not found; using empty config");
+                allProps = new HashMap<>();
+            } else {
+                allProps = KinesisAnalyticsRuntime.getApplicationProperties(resource.getPath());
+            }
+        } else {
+            LOG.info("Loading configuration from Managed Flink runtime properties");
+            allProps = KinesisAnalyticsRuntime.getApplicationProperties();
+        }
+
+        Properties flinkProps = allProps.getOrDefault("FlinkApplicationProperties", new Properties());
+        Map<String, String> config = new HashMap<>();
+        for (String key : flinkProps.stringPropertyNames()) {
+            config.put(key, flinkProps.getProperty(key));
+        }
+        return config;
+    }
+
     private static void validateConfiguration(Map<String, String> config) {
         String streamArn = config.get(KINESIS_STREAM_ARN);
-        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
-        String warehouse = config.get(ICEBERG_WAREHOUSE);
-        String s3TableBucketArn = config.get(S3TABLES_BUCKET_ARN);
-        
         if (streamArn == null || streamArn.isEmpty()) {
-            throw new IllegalArgumentException("KINESIS_STREAM_ARN is required");
+            throw new IllegalArgumentException(KINESIS_STREAM_ARN + " is required");
         }
-        
-        // Validate catalog-specific requirements
-        if ("s3tables".equals(catalogType)) {
-            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
-                throw new IllegalArgumentException("S3TABLES_BUCKET_ARN is required when using S3 Tables catalog");
-            }
-            LOG.info("Using S3 Tables catalog with bucket ARN: {}", s3TableBucketArn);
-        } else {
-            if (warehouse == null || warehouse.isEmpty()) {
-                throw new IllegalArgumentException("ICEBERG_WAREHOUSE is required when using Glue catalog");
-            }
-            LOG.info("Using Glue catalog with warehouse: {}", warehouse);
-        }
-        
-        LOG.info("Configuration validated successfully");
-    }
-    
-    /**
-     * Configure checkpointing for local development only.
-     * AWS Managed Flink configures checkpointing automatically.
-     * Requirements: 3.1
-     */
-    private static void configureCheckpointing(StreamExecutionEnvironment env, Map<String, String> config) {
-        long checkpointInterval = Long.parseLong(
-            config.getOrDefault(CHECKPOINT_INTERVAL, "60000")
-        );
-        
-        LOG.info("Configuring checkpointing for local development");
-        
-        env.enableCheckpointing(checkpointInterval);
-        
-        CheckpointConfig checkpointConfig = env.getCheckpointConfig();
-        checkpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
-        checkpointConfig.setMinPauseBetweenCheckpoints(30000);
-        checkpointConfig.setCheckpointTimeout(600000);  // 10 minutes
-        checkpointConfig.setMaxConcurrentCheckpoints(1);
-        checkpointConfig.setTolerableCheckpointFailureNumber(3);  // Allow 3 failures before job fails
 
-        LOG.info("Checkpointing configured: interval={}ms, mode=EXACTLY_ONCE, unaligned=true", checkpointInterval);
+        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, DEFAULT_CATALOG_TYPE);
+        if ("s3tables".equalsIgnoreCase(catalogType)) {
+            String bucketArn = config.get("s3tables.bucket.arn");
+            if (bucketArn == null || bucketArn.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "s3tables.bucket.arn is required when using S3 Tables catalog");
+            }
+            LOG.info("Using S3 Tables catalog (bucket arn: {})", bucketArn);
+        } else {
+            String warehouse = config.get("iceberg.warehouse");
+            if (warehouse == null || warehouse.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "iceberg.warehouse is required when using Glue catalog");
+            }
+            LOG.info("Using Glue catalog (warehouse: {})", warehouse);
+        }
     }
-    
-    /**
-     * Create Kinesis source with OrderEvent deserializer and production-ready configuration.
-     * Requirements: 3.1
-     */
+
+    private static void configureCheckpointing(StreamExecutionEnvironment env, Map<String, String> config) {
+        long interval = Long.parseLong(
+                config.getOrDefault(CHECKPOINT_INTERVAL, Long.toString(DEFAULT_CHECKPOINT_INTERVAL_MS)));
+
+        env.enableCheckpointing(interval, CheckpointingMode.EXACTLY_ONCE);
+        CheckpointConfig cp = env.getCheckpointConfig();
+        cp.setMinPauseBetweenCheckpoints(30_000);
+        cp.setCheckpointTimeout(600_000);
+        cp.setMaxConcurrentCheckpoints(1);
+        cp.setTolerableCheckpointFailureNumber(3);
+        LOG.info("Local checkpointing configured: interval={}ms, mode=EXACTLY_ONCE", interval);
+    }
+
+    // ------------------------------------------------------------------------
+    // Sources
+    // ------------------------------------------------------------------------
+
     private static KinesisStreamsSource<OrderEvent> createKinesisSource(Map<String, String> config) {
         String streamArn = config.get(KINESIS_STREAM_ARN);
-        String region = config.get(KINESIS_REGION);
-        
-        if (streamArn == null || streamArn.isEmpty()) {
-            throw new IllegalArgumentException("Kinesis stream ARN is required");
-        }
-        
-        LOG.info("Creating Kinesis source for stream: {} in region: {}", streamArn, region);
-        
-        // Configure Kinesis source with production settings
+        String region = config.getOrDefault(KINESIS_REGION,
+                config.getOrDefault(AWS_REGION, DEFAULT_AWS_REGION));
+
+        LOG.info("Kinesis source: stream={}, region={}", streamArn, region);
+
         Configuration sourceConfig = new Configuration();
         sourceConfig.setString("aws.region", region);
         sourceConfig.setString("flink.stream.initpos", "LATEST");
-        sourceConfig.setString("flink.shard.discovery.intervalmillis", "10000");  // Discover new shards every 10s
-        sourceConfig.setString("flink.shard.getrecords.maxrecordcount", "10000");  // Max records per GetRecords call
-        
+        sourceConfig.setString("flink.shard.discovery.intervalmillis", "10000");
+        sourceConfig.setString("flink.shard.getrecords.maxrecordcount", "10000");
+
         return KinesisStreamsSource.<OrderEvent>builder()
-            .setStreamArn(streamArn)
-            .setDeserializationSchema(new OrderEventDeserializer())
-            .setSourceConfig(sourceConfig)
-            .build();
+                .setStreamArn(streamArn)
+                .setDeserializationSchema(new OrderEventDeserializer())
+                .setSourceConfig(sourceConfig)
+                .build();
     }
-    
-    /**
-     * Create watermark strategy for handling out-of-order events with production settings.
-     * Allows events up to 1 minute out of order and handles idle sources.
-     * Requirements: 3.1
-     */
+
     private static WatermarkStrategy<OrderEvent> createWatermarkStrategy() {
         return WatermarkStrategy
-            .<OrderEvent>forBoundedOutOfOrderness(Duration.ofMinutes(1))
-            .withTimestampAssigner((event, timestamp) -> event.getEventTime().toEpochMilli())
-            .withIdleness(Duration.ofMinutes(5));  // Mark source as idle after 5 minutes of no data
+                .<OrderEvent>forBoundedOutOfOrderness(Duration.ofMinutes(1))
+                .withTimestampAssigner((event, timestamp) -> event.getEventTime().toEpochMilli())
+                .withIdleness(Duration.ofMinutes(5));
     }
-    
+
+    // ------------------------------------------------------------------------
+    // Iceberg table bootstrap
+    // ------------------------------------------------------------------------
+
     /**
-     * Ensure the Iceberg table exists, creating it if necessary.
-     * Creates both the database and table with proper configuration.
-     * Requirements: 3.2, 3.3
+     * Create the target Iceberg table if it does not already exist. Safe to call from all
+     * task managers — concurrent creation attempts are handled via {@link AlreadyExistsException}.
      */
     private static void ensureTableExists(CatalogLoader catalogLoader, Map<String, String> config) {
-        String database = config.getOrDefault(ICEBERG_DATABASE, "iceberg_samples");
-        String table = config.getOrDefault(ICEBERG_TABLE, "orders");
-        
-        try {
-            // Load the catalog
-            Catalog catalog = catalogLoader.loadCatalog();
-            
-            TableIdentifier tableId = TableIdentifier.of(database, table);
-            
-            // Check if table exists
-            if (catalog.tableExists(tableId)) {
-                LOG.info("Table {}.{} already exists", database, table);
-                return;
-            }
-            
-            LOG.info("Table {}.{} does not exist, creating it now...", database, table);
-            
-            // Create the table with v2 format and delete vectors
-            Schema schema = createOrderEventSchema();
-            
-            org.apache.iceberg.PartitionSpec partitionSpec = org.apache.iceberg.PartitionSpec.builderFor(schema)
+        String database = config.getOrDefault(ICEBERG_DATABASE, DEFAULT_DATABASE);
+        String table = config.getOrDefault(ICEBERG_TABLE, DEFAULT_TABLE);
+        TableIdentifier tableId = TableIdentifier.of(database, table);
+
+        Catalog catalog = catalogLoader.loadCatalog();
+        if (catalog.tableExists(tableId)) {
+            LOG.info("Table {} already exists", tableId);
+            return;
+        }
+
+        LOG.info("Creating table {}", tableId);
+
+        Schema schema = createOrderEventSchema();
+        PartitionSpec partitionSpec = PartitionSpec.builderFor(schema)
                 .day("event_date")
                 .identity("region")
                 .build();
-            
-            Map<String, String> tableProperties = new HashMap<>();
-            tableProperties.put("format-version", "2");
-            tableProperties.put("write.format.default", "parquet");
-            tableProperties.put("write.parquet.compression-codec", "snappy");
-            tableProperties.put("write.target-file-size-bytes", "134217728");
-            tableProperties.put("write.delete.mode", "merge-on-read");
-            tableProperties.put("write.update.mode", "merge-on-read");
-            tableProperties.put("write.merge.mode", "merge-on-read");
-            tableProperties.put("write.upsert.enabled", "true");
-            
-            // Try to create the table - this will also create the database if needed
+
+        String formatVersion = config.getOrDefault(TABLE_FORMAT_VERSION, DEFAULT_TABLE_FORMAT_VERSION);
+        Map<String, String> tableProperties = new HashMap<>();
+        tableProperties.put("format-version", formatVersion);
+        tableProperties.put("write.format.default", "parquet");
+        tableProperties.put("write.parquet.compression-codec", "snappy");
+        tableProperties.put("write.target-file-size-bytes", Long.toString(DEFAULT_TARGET_FILE_SIZE));
+        tableProperties.put("write.delete.mode", "merge-on-read");
+        tableProperties.put("write.update.mode", "merge-on-read");
+        tableProperties.put("write.merge.mode", "merge-on-read");
+        tableProperties.put("write.upsert.enabled", "true");
+
+        try {
             catalog.createTable(tableId, schema, partitionSpec, tableProperties);
-            LOG.info("Successfully created table {}.{} with v2 format and upsert enabled", database, table);
-            
-        } catch (org.apache.iceberg.exceptions.NoSuchNamespaceException e) {
-            // Database doesn't exist - this shouldn't happen with Glue, but handle it
-            LOG.error("Database {} does not exist. Please create it first using AWS Glue console or Athena.", database);
-            throw new RuntimeException("Database does not exist: " + database + ". Create it first.", e);
-        } catch (org.apache.iceberg.exceptions.AlreadyExistsException e) {
-            LOG.info("Table {}.{} was created by another process", database, table);
-        } catch (Exception e) {
-            LOG.error("Failed to ensure table exists: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to create Iceberg table: " + e.getMessage(), e);
+            LOG.info("Created table {} (format-version={})", tableId, formatVersion);
+        } catch (AlreadyExistsException e) {
+            LOG.info("Table {} was created by another process concurrently", tableId);
         }
     }
-    
-    /**
-     * Create Iceberg catalog loader with Glue Catalog or S3 Tables Catalog configuration.
-     * Requirements: 3.2
-     */
-    private static CatalogLoader createCatalogLoader(Map<String, String> config) {
-        String catalogName = config.getOrDefault(ICEBERG_CATALOG_NAME, "glue_catalog");
-        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
-        String warehouse = config.get(ICEBERG_WAREHOUSE);
-        String awsRegion = config.get(AWS_REGION);
-        
-        Map<String, String> catalogProperties = new HashMap<>();
-        catalogProperties.put("type", "iceberg");
-        
-        if ("s3tables".equals(catalogType)) {
-            // S3 Tables Catalog configuration
-            String s3TableBucketArn = config.get(S3TABLES_BUCKET_ARN);
-            if (s3TableBucketArn == null || s3TableBucketArn.isEmpty()) {
-                throw new IllegalArgumentException("S3 Tables bucket ARN is required when using S3 Tables catalog");
-            }
-            
-            catalogProperties.put("catalog-impl", "software.amazon.s3tables.iceberg.S3TablesCatalog");
-            catalogProperties.put("warehouse", s3TableBucketArn);
-            catalogProperties.put("client.region", awsRegion != null ? awsRegion : "us-east-1");
-            
-            LOG.info("Creating S3 Tables catalog loader: {} with table bucket: {}", catalogName, s3TableBucketArn);
-            
-            return CatalogLoader.custom(
-                catalogName,
-                catalogProperties,
-                new org.apache.hadoop.conf.Configuration(),
-                "software.amazon.s3tables.iceberg.S3TablesCatalog"
-            );
-        } else {
-            // Glue Catalog configuration (default)
-            if (warehouse == null || warehouse.isEmpty()) {
-                throw new IllegalArgumentException("Iceberg warehouse path is required");
-            }
-            
-            catalogProperties.put("catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog");
-            catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
-            catalogProperties.put("warehouse", warehouse);
-            catalogProperties.put("aws.region", awsRegion != null ? awsRegion : "us-east-1");
-            
-            LOG.info("Creating Glue catalog loader: {} with warehouse: {}", catalogName, warehouse);
-            
-            return CatalogLoader.custom(
-                catalogName,
-                catalogProperties,
-                new org.apache.hadoop.conf.Configuration(),
-                "org.apache.iceberg.aws.glue.GlueCatalog"
-            );
-        }
+
+    private static Schema createOrderEventSchema() {
+        return new Schema(
+                Types.NestedField.required(1, "event_id", Types.StringType.get()),
+                Types.NestedField.required(2, "event_time", Types.TimestampType.withZone()),
+                Types.NestedField.required(3, "event_type", Types.StringType.get()),
+                Types.NestedField.required(4, "region", Types.StringType.get()),
+                Types.NestedField.required(5, "event_date", Types.DateType.get()),
+                Types.NestedField.required(6, "order_id", Types.StringType.get()),
+                Types.NestedField.required(7, "customer_id", Types.StringType.get()),
+                Types.NestedField.required(8, "amount", Types.DecimalType.of(18, 2)),
+                Types.NestedField.required(9, "currency", Types.StringType.get()),
+                Types.NestedField.required(10, "status", Types.StringType.get()),
+                Types.NestedField.optional(11, "metadata", Types.MapType.ofOptional(
+                        12, 13,
+                        Types.StringType.get(),
+                        Types.StringType.get())));
     }
-    
-    /**
-     * Create table loader for the target Iceberg table.
-     * Requirements: 3.2
-     */
-    private static TableLoader createTableLoader(CatalogLoader catalogLoader, Map<String, String> config) {
-        String database = config.getOrDefault(ICEBERG_DATABASE, "iceberg_samples");
-        String table = config.getOrDefault(ICEBERG_TABLE, "orders");
-        
-        TableIdentifier tableIdentifier = TableIdentifier.of(database, table);
-        
-        LOG.info("Creating table loader for: {}.{}", database, table);
-        
-        return TableLoader.fromCatalog(catalogLoader, tableIdentifier);
+
+    private static RowType orderEventRowType() {
+        return RowType.of(
+                new LogicalType[]{
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new TimestampType(6),
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new DateType(),
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new DecimalType(18, 2),
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new VarCharType(VarCharType.MAX_LENGTH),
+                        new MapType(
+                                new VarCharType(VarCharType.MAX_LENGTH),
+                                new VarCharType(VarCharType.MAX_LENGTH))},
+                new String[]{
+                        "event_id", "event_time", "event_type", "region", "event_date",
+                        "order_id", "customer_id", "amount", "currency", "status", "metadata"});
     }
-    
-    /**
-     * Configure IcebergSink (SinkV2) with configurable write mode (append or upsert).
-     * Supports optional branch writes for staging data before merging to main.
-     * Optionally adds post-commit maintenance topology with JDBC locks.
-     * Requirements: 3.2, 3.3, 3.4, 3.5, 3.6
-     */
+
+    // ------------------------------------------------------------------------
+    // Sink configuration
+    // ------------------------------------------------------------------------
+
     private static void configureIcebergSink(
             DataStream<RowData> rowDataStream,
             TableLoader tableLoader,
             Map<String, String> config,
             StreamExecutionEnvironment env) {
-        
-        // Get write mode configuration (default: upsert for backward compatibility)
-        String writeMode = config.getOrDefault(WRITE_MODE, "upsert");
-        boolean isUpsertMode = "upsert".equalsIgnoreCase(writeMode);
-        
-        // Get primary key columns for upsert mode
-        // When using HASH distribution with partitioned tables, partition columns must be in equality fields
-        String primaryKeyColumnsStr = config.getOrDefault(PRIMARY_KEY_COLUMNS, "event_id,event_date,region");
-        List<String> equalityFieldColumns = Arrays.asList(primaryKeyColumnsStr.split(","));
-        
-        // Check if branch writes are enabled
+
+        String writeMode = config.getOrDefault(WRITE_MODE, DEFAULT_WRITE_MODE);
+        boolean isUpsert = "upsert".equalsIgnoreCase(writeMode);
+        List<String> equalityFields = Arrays.asList(
+                config.getOrDefault(PRIMARY_KEY_COLUMNS, DEFAULT_PK_COLUMNS).split(","));
+
         String branch = config.get(ICEBERG_BRANCH);
-        boolean useBranchWrites = branch != null && !branch.isEmpty();
-        
-        LOG.info("Configuring IcebergSink with write mode: {}", writeMode);
-        if (isUpsertMode) {
-            LOG.info("Upsert mode enabled with equality fields: {}", equalityFieldColumns);
-        } else {
-            LOG.info("Append-only mode enabled (no deduplication)");
-        }
-        if (useBranchWrites) {
-            LOG.info("Branch writes enabled to branch: {}", branch);
-        }
-        
-        // Build IcebergSink with SinkV2 features
-        var sinkBuilder = IcebergSink.forRowData(rowDataStream)
-            .tableLoader(tableLoader)
-            // Configure write properties for v2 table format
-            .set("write.format.default", "parquet")
-            .set("write.target-file-size-bytes", "134217728")  // 128 MB
-            // Enable metrics for monitoring (Requirements: 3.6)
-            .setSnapshotProperty("flink.job-id", "datastream-iceberg-job")
-            .setSnapshotProperty("flink.max-committed-checkpoint-id", "0");
-        
-        // Configure upsert mode if enabled
-        if (isUpsertMode) {
+        boolean useBranch = branch != null && !branch.isEmpty();
+
+        LOG.info("IcebergSink: writeMode={}{}{}",
+                writeMode,
+                isUpsert ? " (equality fields: " + equalityFields + ")" : "",
+                useBranch ? " branch=" + branch : "");
+
+        IcebergSink.Builder sinkBuilder = IcebergSink.forRowData(rowDataStream)
+                .tableLoader(tableLoader)
+                .set("write.format.default", "parquet")
+                .set("write.target-file-size-bytes", Long.toString(DEFAULT_TARGET_FILE_SIZE))
+                .setSnapshotProperty("flink.job-id", "datastream-iceberg-job");
+
+        if (isUpsert) {
             sinkBuilder
-                .upsert(true)  // Enable upsert mode for merge-on-read with delete vectors
-                .equalityFieldColumns(equalityFieldColumns)
-                .set("write.delete.mode", "merge-on-read")  // Use delete vectors
-                .set("write.update.mode", "merge-on-read")
-                .set("write.merge.mode", "merge-on-read")
-                // Use HASH distribution mode with partition columns in equality fields
-                .distributionMode(org.apache.iceberg.DistributionMode.HASH);
+                    .upsert(true)
+                    .equalityFieldColumns(equalityFields)
+                    .set("write.delete.mode", "merge-on-read")
+                    .set("write.update.mode", "merge-on-read")
+                    .set("write.merge.mode", "merge-on-read")
+                    .distributionMode(DistributionMode.HASH);
         } else {
-            // Append-only mode - no upsert, no equality fields
             sinkBuilder
-                .upsert(false)
-                .distributionMode(org.apache.iceberg.DistributionMode.NONE);
+                    .upsert(false)
+                    .distributionMode(DistributionMode.NONE);
         }
-        
-        // Add branch configuration if specified
-        if (useBranchWrites) {
+
+        if (useBranch) {
             sinkBuilder.toBranch(branch);
         }
-        
+
         sinkBuilder.append();
-        
-        // Check if maintenance is enabled
-        // Note: S3 Tables handles maintenance automatically, so skip if using S3 Tables
-        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, "glue");
-        boolean enableMaintenance = Boolean.parseBoolean(config.getOrDefault(ENABLE_MAINTENANCE, "false"));
-        
-        if ("s3tables".equals(catalogType)) {
-            LOG.info("Using S3 Tables catalog - maintenance is handled automatically by the service");
+
+        // Optional maintenance topology (skipped for S3 Tables, which handles this automatically).
+        String catalogType = config.getOrDefault(ICEBERG_CATALOG_TYPE, DEFAULT_CATALOG_TYPE);
+        boolean enableMaintenance = Boolean.parseBoolean(
+                config.getOrDefault(ENABLE_MAINTENANCE, "false"));
+
+        if ("s3tables".equalsIgnoreCase(catalogType)) {
+            LOG.info("S3 Tables catalog — maintenance handled by the service");
         } else if (enableMaintenance) {
-            LOG.info("Maintenance ENABLED - configuring table maintenance topology");
-            try {
-                TriggerLockFactory lockFactory = createJdbcLockFactory(config);
-                setupTableMaintenance(env, tableLoader, lockFactory);
-            } catch (Exception e) {
-                LOG.error("Failed to setup table maintenance", e);
-                throw new RuntimeException("Failed to setup table maintenance", e);
-            }
+            setupTableMaintenance(env, tableLoader, createJdbcLockFactory(config));
         } else {
-            LOG.info("Maintenance DISABLED - running without maintenance topology");
+            LOG.info("Maintenance disabled");
         }
-        
-        LOG.info("IcebergSink configured successfully with {} mode and metrics", writeMode);
     }
-    
+
     /**
-     * Setup table maintenance with JDBC locks.
-     * Configures ExpireSnapshots, RewriteDataFiles, and DeleteOrphanFiles.
+     * Attach compaction, snapshot expiration, and orphan-file cleanup as Flink operators.
+     * The JDBC lock prevents concurrent conflicting commits when multiple Flink jobs
+     * (or restarts of the same job) target the same table.
      */
     private static void setupTableMaintenance(
             StreamExecutionEnvironment env,
             TableLoader tableLoader,
-            TriggerLockFactory lockFactory) throws Exception {
-        
-        LOG.info("Configuring table maintenance tasks");
-        
-        TableMaintenance.forTable(env, tableLoader, lockFactory)
-            .uidSuffix("datastream-maintenance")
-            .rateLimit(Duration.ofMinutes(10))
-            .lockCheckDelay(Duration.ofSeconds(30))
-            .add(ExpireSnapshots.builder()
-                .scheduleOnCommitCount(10)
-                .maxSnapshotAge(Duration.ofHours(24))
-                .retainLast(5))
-            .add(RewriteDataFiles.builder()
-                .scheduleOnDataFileCount(20)
-                .targetFileSizeBytes(256 * 1024 * 1024)
-                .minFileSizeBytes(32 * 1024 * 1024)
-                .partialProgressEnabled(true)
-                .partialProgressMaxCommits(5)
-                .maxRewriteBytes(2L * 1024 * 1024 * 1024))
-            .add(DeleteOrphanFiles.builder()
-                .scheduleOnCommitCount(50)
-                .minAge(Duration.ofDays(3)))
-            .append();
-        
-        LOG.info("Table maintenance configured: ExpireSnapshots, RewriteDataFiles, DeleteOrphanFiles");
+            TriggerLockFactory lockFactory) {
+        LOG.info("Configuring table maintenance topology");
+
+        try {
+            TableMaintenance.forTable(env, tableLoader, lockFactory)
+                    .uidSuffix("datastream-maintenance")
+                    .rateLimit(Duration.ofMinutes(10))
+                    .lockCheckDelay(Duration.ofSeconds(30))
+                    .add(ExpireSnapshots.builder()
+                            .scheduleOnCommitCount(10)
+                            .maxSnapshotAge(Duration.ofHours(24))
+                            .retainLast(5))
+                    .add(RewriteDataFiles.builder()
+                            .scheduleOnDataFileCount(20)
+                            .targetFileSizeBytes(256L * 1024 * 1024)
+                            .minFileSizeBytes(32L * 1024 * 1024)
+                            .partialProgressEnabled(true)
+                            .partialProgressMaxCommits(5)
+                            .maxRewriteBytes(2L * 1024 * 1024 * 1024))
+                    .add(DeleteOrphanFiles.builder()
+                            .scheduleOnCommitCount(50)
+                            .minAge(Duration.ofDays(3)))
+                    .append();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to set up table maintenance", e);
+        }
     }
-    
-    /**
-     * Create JDBC-based lock factory for distributed maintenance coordination.
-     * Uses PostgreSQL for lock management across multiple Flink jobs.
-     */
+
     private static TriggerLockFactory createJdbcLockFactory(Map<String, String> config) {
         String jdbcUrl = config.get(RDS_JDBC_URL);
+        if (jdbcUrl == null || jdbcUrl.isEmpty()) {
+            throw new IllegalArgumentException(
+                    RDS_JDBC_URL + " is required when " + ENABLE_MAINTENANCE + "=true");
+        }
+
         String user = config.get(RDS_USER);
         String password = config.get(RDS_PASSWORD);
-        String lockId = config.getOrDefault(ICEBERG_DATABASE, "iceberg_samples") + "." + 
-                        config.getOrDefault(ICEBERG_TABLE, "orders");
-        
-        if (jdbcUrl == null || jdbcUrl.isEmpty()) {
-            throw new IllegalArgumentException("RDS JDBC URL is required when maintenance is enabled");
-        }
-        
-        LOG.info("Creating JDBC lock factory with URL: {} and lock ID: {}", jdbcUrl, lockId);
-        
-        Map<String, String> jdbcProperties = new HashMap<>();
+        String lockId = config.getOrDefault(ICEBERG_DATABASE, DEFAULT_DATABASE)
+                + "." + config.getOrDefault(ICEBERG_TABLE, DEFAULT_TABLE);
+
+        LOG.info("JDBC lock: url={}, lockId={}", jdbcUrl, lockId);
+
+        Map<String, String> jdbcProps = new HashMap<>();
         if (user != null && !user.isEmpty()) {
-            jdbcProperties.put("jdbc.user", user);
+            jdbcProps.put("jdbc.user", user);
         }
         if (password != null && !password.isEmpty()) {
-            jdbcProperties.put("jdbc.password", password);
+            jdbcProps.put("jdbc.password", password);
         }
-        // Enable automatic table creation
-        jdbcProperties.put("flink-maintenance.lock.jdbc.init-lock-tables", "true");
-        
-        TriggerLockFactory lockFactory = new JdbcLockFactory(jdbcUrl, lockId, jdbcProperties);
-        
-        // Open the lock factory to initialize the database tables
+        jdbcProps.put("flink-maintenance.lock.jdbc.init-lock-tables", "true");
+
+        TriggerLockFactory lockFactory = new JdbcLockFactory(jdbcUrl, lockId, jdbcProps);
         try {
             lockFactory.open();
-            LOG.info("JDBC lock factory initialized successfully with auto-table creation");
         } catch (Exception e) {
-            LOG.error("Failed to initialize JDBC lock factory", e);
-            throw new RuntimeException("Failed to initialize JDBC lock factory", e);
+            throw new IllegalStateException("Failed to initialise JDBC lock factory", e);
         }
-        
         return lockFactory;
-    }
-    
-    /**
-     * Create Iceberg schema for OrderEvent table.
-     * Schema matches the RowData structure from EventToRowDataConverter.
-     */
-    private static Schema createOrderEventSchema() {
-        return new Schema(
-            Types.NestedField.required(1, "event_id", Types.StringType.get()),
-            Types.NestedField.required(2, "event_time", Types.TimestampType.withZone()),
-            Types.NestedField.required(3, "event_type", Types.StringType.get()),
-            Types.NestedField.required(4, "region", Types.StringType.get()),
-            Types.NestedField.required(5, "event_date", Types.DateType.get()),
-            Types.NestedField.required(6, "order_id", Types.StringType.get()),
-            Types.NestedField.required(7, "customer_id", Types.StringType.get()),
-            Types.NestedField.required(8, "amount", Types.DecimalType.of(18, 2)),
-            Types.NestedField.required(9, "currency", Types.StringType.get()),
-            Types.NestedField.required(10, "status", Types.StringType.get()),
-            Types.NestedField.optional(11, "metadata", Types.MapType.ofOptional(
-                12, 13,
-                Types.StringType.get(),
-                Types.StringType.get()
-            ))
-        );
     }
 }
