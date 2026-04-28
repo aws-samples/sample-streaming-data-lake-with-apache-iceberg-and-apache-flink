@@ -194,9 +194,8 @@ public class HybridSourceJob {
     private static StreamExecutionEnvironment createExecutionEnvironment(Properties props) {
         Configuration config = new Configuration();
         
-        if (isLocalDevelopment()) {
-            config.set(org.apache.flink.configuration.RestOptions.PORT, 8086);
-        }
+        // Note: RestOptions.PORT is NOT set here because Managed Flink rejects it.
+        // For local dev, pass -Drest.port=8086 as a JVM argument if needed.
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
         
@@ -270,8 +269,10 @@ public class HybridSourceJob {
     }
     
     private static boolean isLocalDevelopment() {
-        return System.getenv("IS_LOCAL") != null || 
-               System.getProperty("flink.execution.target") == null;
+        // Check if running locally vs AWS Managed Flink.
+        // Managed Flink sets AWS_EXECUTION_ENV.
+        if (System.getenv("IS_LOCAL") != null) return true;
+        return System.getenv("AWS_EXECUTION_ENV") == null;
     }
     
     private static ObjectMapper createObjectMapper() {

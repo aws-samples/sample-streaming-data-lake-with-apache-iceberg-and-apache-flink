@@ -220,10 +220,8 @@ public class IcebergSourceJob {
     private static StreamExecutionEnvironment createExecutionEnvironment(Properties props) {
         Configuration config = new Configuration();
         
-        // Local development settings
-        if (isLocalDevelopment()) {
-            config.set(org.apache.flink.configuration.RestOptions.PORT, 8084);
-        }
+        // Note: RestOptions.PORT is NOT set here because Managed Flink rejects it.
+        // For local dev, pass -Drest.port=8084 as a JVM argument if needed.
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
         
@@ -305,17 +303,10 @@ public class IcebergSourceJob {
     }
     
     private static boolean isLocalDevelopment() {
-        // On AWS Managed Flink, KinesisAnalyticsRuntime returns properties from the service
-        // Locally, it returns empty. Use the IS_LOCAL env var as an explicit override.
-        if (System.getenv("IS_LOCAL") != null) {
-            return true;
-        }
-        try {
-            Map<String, Properties> runtime = KinesisAnalyticsRuntime.getApplicationProperties();
-            return runtime == null || runtime.isEmpty();
-        } catch (Exception e) {
-            return true;
-        }
+        // Check if running locally vs AWS Managed Flink.
+        // Managed Flink sets AWS_EXECUTION_ENV.
+        if (System.getenv("IS_LOCAL") != null) return true;
+        return System.getenv("AWS_EXECUTION_ENV") == null;
     }
     
     private static ObjectMapper createObjectMapper() {

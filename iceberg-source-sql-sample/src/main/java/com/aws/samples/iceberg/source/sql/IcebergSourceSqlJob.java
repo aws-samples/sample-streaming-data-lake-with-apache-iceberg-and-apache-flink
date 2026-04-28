@@ -269,10 +269,8 @@ public class IcebergSourceSqlJob {
             config.setString("execution.runtime-mode", "BATCH");
         }
         
-        // Local development settings
-        if (isLocalDevelopment()) {
-            config.set(org.apache.flink.configuration.RestOptions.PORT, 8085);
-        }
+        // Note: RestOptions.PORT is NOT set here because Managed Flink rejects it.
+        // For local dev, pass -Drest.port=8085 as a JVM argument if needed.
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
         
@@ -354,7 +352,9 @@ public class IcebergSourceSqlJob {
     }
     
     private static boolean isLocalDevelopment() {
-        return System.getenv("IS_LOCAL") != null || 
-               System.getProperty("flink.execution.target") == null;
+        // Check if running locally vs AWS Managed Flink.
+        // Managed Flink sets AWS_EXECUTION_ENV.
+        if (System.getenv("IS_LOCAL") != null) return true;
+        return System.getenv("AWS_EXECUTION_ENV") == null;
     }
 }
