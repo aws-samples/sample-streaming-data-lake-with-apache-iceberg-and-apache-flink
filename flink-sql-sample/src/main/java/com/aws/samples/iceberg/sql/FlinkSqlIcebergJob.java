@@ -41,9 +41,11 @@ public class FlinkSqlIcebergJob {
         StreamExecutionEnvironment env = FlinkEnvironments.getOrCreateLocal(LOCAL_WEB_UI_PORT);
         Properties props = AppProperties.load(env);
         
-        String kinesisStreamArn = props.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source");
-        String awsRegion = props.getProperty("aws.region", "us-west-1");
-        String s3WarehousePath = props.getProperty("s3.warehouse.path", "s3://iceberg-us-west-1-985539754032/warehouse/");
+        String kinesisStreamArn = props.getProperty("kinesis.stream.arn",
+                "arn:aws:kinesis:us-east-1:123456789012:stream/iceberg-source");
+        String awsRegion = props.getProperty("aws.region", "us-east-1");
+        String s3WarehousePath = props.getProperty("s3.warehouse.path",
+                "s3://iceberg-warehouse-123456789012/warehouse/");
         String glueDatabase = props.getProperty("glue.database", "iceberg_samples");
         String tablePrefix = props.getProperty("table.prefix", "sql_");
         String catalogType = props.getProperty("iceberg.catalog.type", "glue");

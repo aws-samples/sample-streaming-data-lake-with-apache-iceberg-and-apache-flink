@@ -384,8 +384,14 @@ The samples are intentionally small and self-contained so each one can be read t
 3. Give every operator an explicit `uid()` and a human `name()` — the Flink production-readiness guide expects it and it keeps checkpoint state portable across job-graph changes.
 4. Add the new sample to `cdk-infrastructure/lib/iceberg-flink-stack.ts` so it shares the CDK infrastructure.
 
+See [CONTRIBUTING](CONTRIBUTING.md) for the full contribution guide and the code of conduct.
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for reporting security issues. Do not report security issues via public GitHub issues.
+
 ---
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
