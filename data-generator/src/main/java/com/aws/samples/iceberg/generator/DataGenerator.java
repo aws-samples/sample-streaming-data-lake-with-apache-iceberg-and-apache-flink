@@ -245,8 +245,17 @@ public class DataGenerator {
      * Main entry point.
      */
     public static void main(String[] args) {
+        // Route to Avro generator if first arg is 'avro'
+        if (args.length > 0 && "avro".equalsIgnoreCase(args[0])) {
+            String[] rest = new String[args.length - 1];
+            System.arraycopy(args, 1, rest, 0, rest.length);
+            AvroDataGenerator.main(rest);
+            return;
+        }
+
         if (args.length < 3) {
             System.err.println("Usage: DataGenerator <stream-name> <region> <events-per-second> [duration-seconds] [schema-version]");
+            System.err.println("   OR: DataGenerator avro <stream-name> <region> <registry-name> [events-per-second] [duration-seconds]");
             System.err.println();
             System.err.println("Arguments:");
             System.err.println("  stream-name        : Name of the Kinesis stream");

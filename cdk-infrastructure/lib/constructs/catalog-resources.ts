@@ -11,6 +11,9 @@ export interface CatalogResourcesProps {
   databaseName: string;
   account: string;
   region: string;
+  // When true, skip creating a local warehouse/namespace (used when source app reads
+  // from an external Iceberg table provided via context overrides).
+  skipCatalogCreation?: boolean;
 }
 
 export class CatalogResources extends Construct {
@@ -21,6 +24,10 @@ export class CatalogResources extends Construct {
 
   constructor(scope: Construct, id: string, props: CatalogResourcesProps) {
     super(scope, id);
+
+    if (props.skipCatalogCreation) {
+      return;
+    }
 
     if (props.catalogType === 'glue') {
       this.warehouseBucket = new s3.Bucket(this, 'IcebergWarehouse', {

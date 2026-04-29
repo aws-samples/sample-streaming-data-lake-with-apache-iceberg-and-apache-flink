@@ -1,100 +1,49 @@
 package com.aws.samples.iceberg.sql;
 
-import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
-import org.apache.flink.streaming.api.CheckpointingMode;
-import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
+import com.aws.samples.iceberg.runtime.AppProperties;
+import com.aws.samples.iceberg.runtime.Checkpointing;
+import com.aws.samples.iceberg.runtime.FlinkEnvironments;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Map;
 import java.util.Properties;
 
 /**
  * Flink SQL sample demonstrating Iceberg table writes with Glue Catalog or S3 Tables.
- * 
- * This job demonstrates:
- * - Creating an Iceberg catalog using SQL DDL with Glue Catalog or S3 Tables
- * - Reading from Kinesis Data Stream using SQL
- * - Writing to Iceberg tables with v2 format
- * - UPSERT operations using primary keys
- * - Embedded compaction via SQL hints
- * 
- * Environment Variables:
- * - KINESIS_STREAM_NAME: Name of the Kinesis stream to read from (default: iceberg-events)
- * - AWS_REGION: AWS region for Kinesis and Glue (default: us-east-1)
- * - S3_WAREHOUSE_PATH: S3 path for Iceberg warehouse (default: s3://iceberg-warehouse-{account}/warehouse)
- * - GLUE_DATABASE: Glue database name (default: iceberg_samples)
- * - CATALOG_TYPE: Catalog type - 'glue' or 's3tables' (default: glue)
- * - S3TABLES_BUCKET_ARN: S3 Table Bucket ARN (required when CATALOG_TYPE=s3tables)
- * - ENABLE_MAINTENANCE: Enable maintenance (default: false)
- * - RDS_JDBC_URL: PostgreSQL JDBC URL for locks (default: jdbc:postgresql://localhost:5432/iceberg_locks)
+ *
+ * <p>Features: creating an Iceberg catalog via SQL DDL, reading Kinesis via SQL,
+ * writing to Iceberg v2 tables, optional UPSERT with PK enforcement, SQL hints for
+ * embedded compaction (informational only in this sample).
+ *
+ * <p>Configuration keys (via {@code FlinkApplicationProperties}):
+ * <ul>
+ *   <li>{@code kinesis.stream.arn} — Kinesis stream ARN (required)
+ *   <li>{@code aws.region} — AWS region (default: {@code us-east-1})
+ *   <li>{@code s3.warehouse.path} — S3 warehouse for Glue catalog
+ *   <li>{@code s3tables.bucket.arn} — required for {@code iceberg.catalog.type=s3tables}
+ *   <li>{@code glue.database} — target database (default: {@code iceberg_samples})
+ *   <li>{@code table.prefix} — table name prefix (default: {@code sql_})
+ *   <li>{@code iceberg.catalog.type} — {@code glue} (default) or {@code s3tables}
+ *   <li>{@code write.mode} — {@code append} (default) or {@code upsert}
+ *   <li>{@code primary.key.columns} — CSV list (default: {@code event_id,event_date,region})
+ *   <li>{@code enable.maintenance} — informational; DataStream API is preferred for maintenance
+ * </ul>
  */
 public class FlinkSqlIcebergJob {
-    
+
     private static final Logger LOG = LoggerFactory.getLogger(FlinkSqlIcebergJob.class);
-    private static final String LOCAL_APPLICATION_PROPERTIES_RESOURCE = "flink-application-properties-dev.json";
-    
-    /**
-     * Check if running in local execution mode.
-     */
-    private static boolean isLocal(StreamExecutionEnvironment env) {
-        return env instanceof LocalStreamEnvironment;
-    }
-    
-    /**
-     * Load application properties from Amazon Managed Service for Apache Flink runtime
-     * or from local resource file when running locally.
-     */
-    private static Properties loadApplicationProperties(StreamExecutionEnvironment env) throws Exception {
-        if (isLocal(env)) {
-            LOG.info("Loading application properties from '{}'", LOCAL_APPLICATION_PROPERTIES_RESOURCE);
-            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties(
-                FlinkSqlIcebergJob.class.getClassLoader().getResource(LOCAL_APPLICATION_PROPERTIES_RESOURCE).getPath()
-            );
-            return props.getOrDefault("FlinkApplicationProperties", new Properties());
-        } else {
-            LOG.info("Loading application properties from Amazon Managed Service for Apache Flink");
-            Map<String, Properties> props = KinesisAnalyticsRuntime.getApplicationProperties();
-            return props.getOrDefault("FlinkApplicationProperties", new Properties());
-        }
-    }
-    
-    /**
-     * Create execution environment with Web UI for local development.
-     */
-    private static StreamExecutionEnvironment createExecutionEnvironment() {
-        // Try to create local environment with Web UI
-        // If flink-runtime-web is on classpath, this will enable the UI
-        try {
-            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            if (isLocal(env)) {
-                // Recreate with Web UI enabled on port 8082 (8081 might be used by DataStreamJob)
-                org.apache.flink.configuration.Configuration config = new org.apache.flink.configuration.Configuration();
-                config.setString("rest.port", "8082");
-                config.setString("rest.bind-address", "localhost");
-                env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(config);
-                LOG.info("Local execution detected - Flink Web UI available at http://localhost:8082");
-            }
-            return env;
-        } catch (Exception e) {
-            LOG.warn("Could not create environment with Web UI, falling back to standard environment", e);
-            return StreamExecutionEnvironment.getExecutionEnvironment();
-        }
-    }
-    
+    private static final int LOCAL_WEB_UI_PORT = 8084;
+
     public static void main(String[] args) throws Exception {
-        // Set up the streaming execution environment with Web UI for local dev
-        StreamExecutionEnvironment env = createExecutionEnvironment();
+        StreamExecutionEnvironment env = FlinkEnvironments.getOrCreateLocal(LOCAL_WEB_UI_PORT);
+        Properties props = AppProperties.load(env);
         
-        // Load configuration from runtime properties
-        Properties props = loadApplicationProperties(env);
-        
-        String kinesisStreamName = props.getProperty("kinesis.stream.name", "iceberg-events");
-        String awsRegion = props.getProperty("aws.region", "us-east-1");
-        String s3WarehousePath = props.getProperty("s3.warehouse.path", "s3://iceberg-warehouse/warehouse");
+        String kinesisStreamArn = props.getProperty("kinesis.stream.arn", "arn:aws:kinesis:us-west-1:985539754032:stream/iceberg-source");
+        String awsRegion = props.getProperty("aws.region", "us-west-1");
+        String s3WarehousePath = props.getProperty("s3.warehouse.path", "s3://iceberg-us-west-1-985539754032/warehouse/");
         String glueDatabase = props.getProperty("glue.database", "iceberg_samples");
         String tablePrefix = props.getProperty("table.prefix", "sql_");
         String catalogType = props.getProperty("iceberg.catalog.type", "glue");
@@ -103,9 +52,9 @@ public class FlinkSqlIcebergJob {
         String writeMode = props.getProperty("write.mode", "append");  // "append" or "upsert"
         String primaryKeyColumns = props.getProperty("primary.key.columns", "event_id,event_date,region");
         boolean isUpsertMode = "upsert".equalsIgnoreCase(writeMode);
-        
+
         LOG.info("Starting Flink SQL Iceberg Job");
-        LOG.info("Kinesis Stream: {}", kinesisStreamName);
+        LOG.info("Kinesis Stream ARN: {}", kinesisStreamArn);
         LOG.info("AWS Region: {}", awsRegion);
         LOG.info("Catalog Type: {}", catalogType);
         LOG.info("Write Mode: {}", writeMode);
@@ -129,17 +78,14 @@ public class FlinkSqlIcebergJob {
             LOG.warn("For full maintenance capabilities, use DataStreamIcebergJob with ENABLE_MAINTENANCE=true");
         }
         
-        // Configure checkpointing for local development only
-        // AWS Managed Flink configures checkpointing automatically
-        if (isLocal(env)) {
-            env.enableCheckpointing(60000);
-            env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
-            env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30000);
-            env.getCheckpointConfig().setCheckpointTimeout(600000);
-            env.getCheckpointConfig().setMaxConcurrentCheckpoints(1);
-            LOG.info("Checkpointing configured for local development: interval=60s, mode=EXACTLY_ONCE");
+        // Configure checkpointing for local development only.
+        // AWS Managed Flink configures checkpointing for us on the service side.
+        if (FlinkEnvironments.isLocal(env)) {
+            long interval = Long.parseLong(props.getProperty(
+                    "checkpoint.interval.ms", Long.toString(Checkpointing.DEFAULT_INTERVAL_MS)));
+            Checkpointing.configureLocalDefaults(env, interval);
         } else {
-            LOG.info("Running on AWS Managed Flink - checkpointing configured by the service");
+            LOG.info("Running on AWS Managed Flink — checkpointing configured by the service");
         }
         
         // Create Table Environment
@@ -147,6 +93,12 @@ public class FlinkSqlIcebergJob {
             .inStreamingMode()
             .build();
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, settings);
+        
+        // Use SinkV2 (IcebergSink) for proper Java 17 checkpoint serialization.
+        // On Managed Flink this must be set via runtime properties (table.exec.iceberg.use-v2-sink).
+        if (FlinkEnvironments.isLocal(env)) {
+            tableEnv.getConfig().set("table.exec.iceberg.use-v2-sink", "true");
+        }
         
         LOG.info("Table environment created");
         
@@ -192,34 +144,31 @@ public class FlinkSqlIcebergJob {
         LOG.info("Creating Kinesis source table in default catalog");
         String createKinesisSourceSql = "CREATE TABLE kinesis_source (\n" +
             "    event_id STRING,\n" +
-            "    event_time STRING,\n" +  // Read as STRING, parse later
+            "    event_time STRING,\n" +
             "    event_type STRING,\n" +
             "    region STRING,\n" +
-            "    event_date STRING,\n" +  // Read as STRING, parse later
+            "    event_date STRING,\n" +
             "    metadata MAP<STRING, STRING>,\n" +
-            "    -- Order event fields\n" +
             "    order_id STRING,\n" +
             "    customer_id STRING,\n" +
-            "    amount DOUBLE,\n" +  // Use DOUBLE instead of DECIMAL for JSON compatibility
+            "    amount DOUBLE,\n" +
             "    currency STRING,\n" +
             "    status STRING,\n" +
-            "    -- User event fields\n" +
             "    user_id STRING,\n" +
             "    action STRING,\n" +
             "    device_type STRING,\n" +
             "    ip_address STRING,\n" +
             "    user_agent STRING,\n" +
-            "    -- Click event fields\n" +
             "    session_id STRING,\n" +
             "    page_url STRING,\n" +
             "    referrer STRING,\n" +
             "    scroll_depth INT,\n" +
             "    time_on_page_seconds BIGINT\n" +
             ") WITH (\n" +
-            "    'connector' = 'kinesis-legacy',\n" +
-            "    'stream' = '" + kinesisStreamName + "',\n" +
+            "    'connector' = 'kinesis',\n" +
+            "    'stream.arn' = '" + kinesisStreamArn + "',\n" +
             "    'aws.region' = '" + awsRegion + "',\n" +
-            "    'scan.stream.initpos' = 'LATEST',\n" +
+            "    'source.init.position' = 'LATEST',\n" +
             "    'format' = 'json',\n" +
             "    'json.fail-on-missing-field' = 'false',\n" +
             "    'json.ignore-parse-errors' = 'true'\n" +
@@ -335,7 +284,7 @@ public class FlinkSqlIcebergJob {
      */
     private static void createOrderEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
         String primaryKeyClause = isUpsertMode ? 
-            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+            ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
         String upsertProperties = isUpsertMode ?
             "    'write.upsert.enabled' = 'true',\n" +
@@ -354,7 +303,7 @@ public class FlinkSqlIcebergJob {
             "    amount DECIMAL(18, 2),\n" +
             "    currency STRING,\n" +
             "    status STRING,\n" +
-            "    metadata MAP<STRING, STRING>,\n" +
+            "    metadata MAP<STRING, STRING>" +
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
@@ -377,7 +326,7 @@ public class FlinkSqlIcebergJob {
      */
     private static void createUserEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
         String primaryKeyClause = isUpsertMode ? 
-            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+            ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
         String upsertProperties = isUpsertMode ?
             "    'write.upsert.enabled' = 'true',\n" +
@@ -396,7 +345,7 @@ public class FlinkSqlIcebergJob {
             "    device_type STRING,\n" +
             "    ip_address STRING,\n" +
             "    user_agent STRING,\n" +
-            "    metadata MAP<STRING, STRING>,\n" +
+            "    metadata MAP<STRING, STRING>" +
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
@@ -419,7 +368,7 @@ public class FlinkSqlIcebergJob {
      */
     private static void createClickEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
         String primaryKeyClause = isUpsertMode ? 
-            "    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED,\n" : "";
+            ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
         String upsertProperties = isUpsertMode ?
             "    'write.upsert.enabled' = 'true',\n" +
@@ -438,7 +387,7 @@ public class FlinkSqlIcebergJob {
             "    referrer STRING,\n" +
             "    scroll_depth INT,\n" +
             "    time_on_page_seconds BIGINT,\n" +
-            "    metadata MAP<STRING, STRING>,\n" +
+            "    metadata MAP<STRING, STRING>" +
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +

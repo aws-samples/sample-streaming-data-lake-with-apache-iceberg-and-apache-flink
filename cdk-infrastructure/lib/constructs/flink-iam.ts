@@ -1,4 +1,3 @@
-import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kinesis from 'aws-cdk-lib/aws-kinesis';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -23,6 +22,12 @@ export interface FlinkIamProps {
   enableMaintenance: boolean;
   vpc?: ec2.IVpc;
   dbSecret?: secretsmanager.ISecret;
+  // Source-app overrides (grant read access to external Iceberg source)
+  sourceWarehouse?: string;        // S3 warehouse path (e.g., s3://bucket/warehouse)
+  sourceTableBucketArn?: string;   // S3 Table Bucket ARN
+  sourceDatabase?: string;         // External Glue database name (for glue: permissions)
+  // Glue Schema Registry (for dynamic-avro app type)
+  schemaRegistryName?: string;
 }
 
 export class FlinkIam extends Construct {
@@ -76,6 +81,29 @@ export class FlinkIam extends Construct {
     // S3 warehouse bucket (Glue only)
     if (props.catalogType === 'glue' && props.warehouseBucket) {
       props.warehouseBucket.grantReadWrite(this.role);
+    }
+
+    // External source warehouse (for source apps pointing at existing tables)
+    if (props.catalogType === 'glue' && props.sourceWarehouse) {
+      // Parse bucket name from s3://bucket/path
+      const match = props.sourceWarehouse.match(/^s3:\/\/([^/]+)/);
+      if (match) {
+        const sourceBucketArn = `arn:aws:s3:::${match[1]}`;
+        this.role.addToPolicy(new iam.PolicyStatement({
+          actions: ['s3:GetObject', 's3:GetObjectVersion', 's3:ListBucket', 's3:GetBucketLocation'],
+          resources: [sourceBucketArn, `${sourceBucketArn}/*`],
+        }));
+      }
+    }
+    if (props.catalogType === 's3tables' && props.sourceTableBucketArn) {
+      this.role.addToPolicy(new iam.PolicyStatement({
+        actions: [
+          's3tables:GetTableBucket', 's3tables:GetNamespace', 's3tables:ListNamespaces',
+          's3tables:ListTables', 's3tables:GetTable', 's3tables:GetTableMetadataLocation',
+          's3tables:GetTableData',
+        ],
+        resources: [props.sourceTableBucketArn, `${props.sourceTableBucketArn}/table/*`],
+      }));
     }
 
     // CDK assets bucket
@@ -137,6 +165,26 @@ export class FlinkIam extends Construct {
           's3tables:GetTablePolicy', 's3tables:PutTablePolicy',
         ],
         resources: [`arn:aws:s3tables:${props.region}:${props.account}:bucket/${props.s3TableBucketName}/table/*`],
+      }));
+    }
+
+    // Glue Schema Registry permissions (for dynamic-avro app type)
+    if (props.schemaRegistryName) {
+      this.role.addToPolicy(new iam.PolicyStatement({
+        sid: 'GlueSchemaRegistryAccess',
+        actions: [
+          'glue:GetRegistry', 'glue:ListRegistries',
+          'glue:CreateSchema', 'glue:DeleteSchema', 'glue:UpdateSchema',
+          'glue:GetSchema', 'glue:ListSchemas',
+          'glue:RegisterSchemaVersion', 'glue:GetSchemaVersion', 'glue:ListSchemaVersions',
+          'glue:GetSchemaByDefinition',
+          'glue:QuerySchemaVersionMetadata', 'glue:PutSchemaVersionMetadata',
+          'glue:CheckSchemaVersionValidity',
+        ],
+        resources: [
+          `arn:aws:glue:${props.region}:${props.account}:registry/${props.schemaRegistryName}`,
+          `arn:aws:glue:${props.region}:${props.account}:schema/${props.schemaRegistryName}/*`,
+        ],
       }));
     }
 

@@ -6,11 +6,12 @@
 # Kiro
 .kiro/
 
-# IntelliJ Run Configurations
-.run/
+# IntelliJ Run Configurations (shared, with Java 17 --add-opens flags)
+# .run/
 
 # Blog post (internal draft)
 BLOG_POST.md
+ignore-me/
 
 # Maven
 target/
@@ -51,3 +52,9 @@ cdk-infrastructure/*.d.ts
 
 # Environment variables
 .env
+
+# CDK deployment outputs
+cdk-infrastructure/outputs-*.json
+
+# Extracted debug class files
+/com/

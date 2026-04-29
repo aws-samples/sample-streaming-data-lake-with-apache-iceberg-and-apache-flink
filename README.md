@@ -1,882 +1,391 @@
-# Apache Iceberg 1.10 with Apache Flink 1.20 on AWS Managed Flink
+# Streaming to Apache Iceberg with Apache Flink on AWS
 
-This repository contains production-ready sample applications demonstrating Apache Iceberg 1.10 integration with Apache Flink 1.20 on AWS Managed Service for Apache Flink. The samples showcase modern data lakehouse patterns including upsert operations, table maintenance, and multi-table routing.
+Production-ready samples that showcase Apache Iceberg 1.10 on Apache Flink 2.2 running on AWS Managed Service for Apache Flink. The samples cover seven patterns — DataStream and SQL sinks, a dynamic sink driven by JSON inference, a dynamic sink driven by AWS Glue Schema Registry (Avro), and three variants for reading Iceberg tables (DataStream, SQL, and hybrid batch-then-stream).
 
-## Introduction
+Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is deployable via a single parameterized CDK stack, and shares a small `runtime` toolbox that keeps each job's `main()` focused on its own pipeline.
 
-Apache Iceberg 1.10 introduces significant improvements for streaming workloads, including enhanced delete performance with delete vectors, improved metadata handling, and better support for upsert operations. Combined with Apache Flink 1.20's IcebergSink (SinkV2), these samples demonstrate how to build production-grade streaming data pipelines that write to Iceberg tables on AWS.
+## What this repository gives you
 
-This repository provides three distinct patterns:
-- **DataStream API**: Production-grade ingestion with automated table maintenance
-- **Flink SQL API**: SQL-first approach for multi-table routing
-- **Dynamic Sink**: Automatic table creation and schema evolution
+- **Seven deployable Flink jobs** covering sink, source, dynamic-routing, and hybrid patterns.
+- **One CDK stack** parameterised by `-c appType=…` and `-c catalogType=…` that provisions the full infrastructure for any of them.
+- **Shared runtime utilities** (`shared-common`) for environment bootstrapping, property loading, checkpointing defaults, Kinesis source configuration, and Iceberg catalog loading — so the samples demonstrate their pipeline logic, not their boilerplate.
+- **A configurable data generator** that emits JSON or Avro events, registers schemas in Glue Schema Registry on demand, and simulates duplicate keys + late arrivals.
+- **Property-based tests** (jqwik) that validate upsert semantics, compaction behaviour, snapshot expiration, and orphan cleanup on their own.
 
-## What You'll Deploy
+---
 
-The CDK infrastructure provisions a complete streaming data pipeline:
+## The samples
+
+| Sample | API | Pattern | Write path | Notes |
+|---|---|---|---|---|
+| `datastream-sample` | DataStream | Single table, upsert + in-job maintenance | `IcebergSink` (SinkV2) | Optional compaction/snapshot expiration coordinated via RDS PostgreSQL JDBC lock |
+| `flink-sql-sample` | Table / SQL | Multi-table routing from one Kinesis stream | `StatementSet` + Iceberg SQL connector | Declarative DDL; good for SQL-first teams |
+| `dynamic-sink-sample` | DataStream | Multi-table routing from one Kinesis stream (JSON) | `DynamicIcebergSink` | Schema inferred from JSON at runtime; routes by a configurable field |
+| `dynamic-sink-avro-sample` | DataStream | Multi-table routing driven by Avro schemas in AWS Glue Schema Registry | `DynamicIcebergSink` | Producers register schemas in GSR; job resolves schema by UUID and evolves Iceberg tables automatically |
+| `iceberg-source-datastream-sample` | DataStream | Read an Iceberg table, write rows to Kinesis | `IcebergSource` (FLIP-27) | Streaming or batch; append-only source tables only for streaming |
+| `iceberg-source-sql-sample` | Table / SQL | Read Iceberg with SQL hints, write rows to Kinesis | Iceberg SQL connector | Supports branches, tags, time travel via SQL hints |
+| `hybrid-source-sample` | DataStream | Bootstrap from Iceberg, switch to Kinesis streaming | `HybridSource` | Backfill-then-stream for migrations |
+
+All write-path samples use Iceberg format version 2. See the "Delete files and format versions" section below for why — short version: Flink 1.10's Iceberg sink does not write deletion vectors, and v3 requires them for positional deletes.
+
+---
+
+## Architecture at a glance
 
 ```
 ┌─────────────────┐      ┌──────────────────┐      ┌─────────────────────┐
-│  Data Generator │─────▶│  Kinesis Stream  │─────▶│  Managed Flink App  │
-│    (Local)      │      │   (2 shards)     │      │   (2-4 KPUs)        │
+│  data-generator │─────▶│  Kinesis stream  │─────▶│  Managed Flink app  │
 └─────────────────┘      └──────────────────┘      └──────────┬──────────┘
-                                                               │
-                    ┌──────────────────────────────────────────┼──────────────────┐
-                    │                                          ▼                  │
-                    │  Option A: Glue Catalog                                     │
-                    │  ┌──────────────────┐    ┌──────────────────┐              │
-                    │  │  S3 Warehouse    │◀───│  Iceberg Tables  │              │
-                    │  │  (Versioned)     │    │  (Glue Catalog)  │              │
-                    │  └──────────────────┘    └──────────────────┘              │
-                    │                                                             │
-                    │  Option B: S3 Tables (Native Iceberg)                       │
-                    │  ┌──────────────────────────────────────────┐              │
-                    │  │  S3 Table Bucket (Auto-maintained)       │              │
-                    │  │  - Automatic compaction                  │              │
-                    │  │  - Automatic snapshot management         │              │
-                    │  └──────────────────────────────────────────┘              │
-                    │                                                             │
-                    │  ┌──────────────────┐    ┌──────────────────┐              │
-                    │  │  RDS PostgreSQL  │◀───│  Maintenance     │              │
-                    │  │  (JDBC Locks)    │    │  Coordinator     │              │
-                    │  └──────────────────┘    └──────────────────┘              │
-                    │         (Optional - DataStream with Glue + maintenance)     │
-                    └─────────────────────────────────────────────────────────────┘
+                                                              │
+                                   ┌──────────────────────────┼──────────────────────┐
+                                   │                          ▼                      │
+                                   │  Catalog: Glue                                   │
+                                   │  ┌───────────────────┐    ┌──────────────────┐  │
+                                   │  │  S3 warehouse     │◀───│  Iceberg tables  │  │
+                                   │  │  (versioned)      │    │  (Glue catalog)  │  │
+                                   │  └───────────────────┘    └──────────────────┘  │
+                                   │                                                  │
+                                   │  Catalog: S3 Tables                              │
+                                   │  ┌──────────────────────────────────────────┐    │
+                                   │  │  S3 Table Bucket (automatic maintenance) │    │
+                                   │  └──────────────────────────────────────────┘    │
+                                   │                                                  │
+                                   │  Optional: DataStream + maintenance              │
+                                   │  ┌───────────────────┐    ┌──────────────────┐  │
+                                   │  │  RDS PostgreSQL   │◀───│  Maintenance     │  │
+                                   │  │  (JDBC lock)      │    │  coordinator     │  │
+                                   │  └───────────────────┘    └──────────────────┘  │
+                                   └──────────────────────────────────────────────────┘
 ```
 
-### Infrastructure Components
+Dynamic Avro adds a Glue Schema Registry in front of the Kinesis stream. Source samples reverse the diagram — they read from an existing Iceberg table and write rows as JSON to a Kinesis stream.
 
-**Core Resources (Glue Catalog - Default):**
-- Amazon Kinesis Data Stream (2 shards, 24h retention)
-- Amazon S3 bucket (versioned, encrypted)
-- AWS Glue database for Iceberg catalog
-- AWS Managed Flink application (Flink 1.20)
-- CloudWatch Log Groups for monitoring
+---
 
-**Core Resources (S3 Tables Catalog):**
-- Amazon Kinesis Data Stream (2 shards, 24h retention)
-- S3 Table Bucket (native Iceberg storage with automatic maintenance)
-- S3 Tables namespace
-- AWS Managed Flink application (Flink 1.20)
-- CloudWatch Log Groups for monitoring
-- Custom resource Lambda for namespace cleanup on stack deletion
+## Repository layout
 
-**Additional Resources (DataStream with Glue + Maintenance):**
-- Amazon VPC (2 AZs, public/private subnets, NAT Gateway)
-- Amazon RDS PostgreSQL (t3.micro, for distributed locking)
-- Security Groups for Flink and RDS
+```
+streaming-data-lake-with-apache-iceberg-and-apache-flink/
+├── shared-common/                              # Code reused by every sample
+│   └── src/main/java/com/aws/samples/iceberg/
+│       ├── config/IcebergConfig.java           # Unified Glue + S3 Tables catalog loader
+│       ├── runtime/                            # NEW: env + properties + checkpointing
+│       │   ├── AppProperties.java              #   loads FlinkApplicationProperties (MSF or local)
+│       │   ├── Checkpointing.java              #   exactly-once defaults
+│       │   ├── FlinkEnvironments.java          #   isLocal() + getOrCreateLocal(port)
+│       │   └── KinesisSources.java             #   KinesisStreamsSource with production defaults
+│       ├── model/                              # Event POJOs (OrderEvent, UserEvent, ClickEvent)
+│       └── util/                               # Serde + RowData conversion helpers
+├── datastream-sample/                          # IcebergSink (SinkV2) + optional maintenance
+├── flink-sql-sample/                           # SQL API, multi-table routing
+├── dynamic-sink-sample/                        # Schema-agnostic dynamic sink (JSON)
+├── dynamic-sink-avro-sample/                   # Dynamic sink driven by Glue Schema Registry
+├── iceberg-source-datastream-sample/           # FLIP-27 IcebergSource → Kinesis
+├── iceberg-source-sql-sample/                  # SQL IcebergSource → Kinesis
+├── hybrid-source-sample/                       # HybridSource: Iceberg bootstrap + Kinesis stream
+├── data-generator/                             # JSON and Avro data generators
+├── cdk-infrastructure/                         # Single parameterized CDK stack
+│   └── lib/
+│       ├── iceberg-flink-stack.ts              # Main stack
+│       └── constructs/                         # KinesisStreams, CatalogResources, MaintenanceResources, FlinkIam
+├── docker-compose.yml                          # Local Postgres for JDBC lock testing
+├── .run/                                       # IntelliJ run configurations
+└── pom.xml                                     # Parent POM (Flink 2.2, Iceberg 1.10)
+```
 
-## Applications
+Every sample `main()` follows the same shape:
 
-### 1. DataStream API (`datastream-sample`)
-**Best for: Production workloads requiring automated maintenance**
+```java
+StreamExecutionEnvironment env = FlinkEnvironments.getOrCreateLocal(LOCAL_WEB_UI_PORT);
+Map<String, String> config = AppProperties.loadAsMap(env);
+validateConfiguration(config);
+if (FlinkEnvironments.isLocal(env)) {
+    Checkpointing.configureLocalDefaults(env, interval);
+}
+// build source → transform → sink → env.execute(...)
+```
 
-- Uses IcebergSink (SinkV2) with upsert mode and equality deletes
-- Automated table maintenance with distributed JDBC locking
-- Configurable maintenance tasks: snapshot expiration, compaction, orphan cleanup
-- Writes to partitioned `orders` table (by date and region)
-- Includes property-based tests for data integrity
-
-**Key Features:**
-- Upsert operations using Iceberg's equality deletes
-- Coordinated maintenance across distributed Flink tasks
-- Production-ready error handling and monitoring
-- Configurable maintenance intervals and thresholds
-
-### 2. Flink SQL API (`flink-sql-sample`)
-**Best for: SQL-first teams and multi-table scenarios**
-
-- Pure SQL approach using Flink Table API
-- StatementSet for efficient multi-table routing
-- Dynamic table creation from SQL DDL
-- Writes to `sql_orders`, `sql_users`, `sql_clicks` tables
-- Demonstrates Kinesis JSON deserialization in SQL
-
-**Key Features:**
-- Declarative SQL-based pipeline definition
-- Multi-table routing with single source
-- Easy to understand and maintain
-- Property-based tests for upsert semantics
-
-### 3. Dynamic Sink (`dynamic-sink-sample`)
-**Best for: Multi-tenant or dynamic schema scenarios**
-
-- Schema-agnostic event processing with automatic schema inference
-- Automatic table routing based on event metadata (e.g., `event_type` field)
-- Dynamic table creation with schema inferred from JSON structure
-- Schema evolution support as new fields appear
-- Routes to tables named `{event_type}_events` (e.g., `order_events`, `user_events`)
-
-**Key Features:**
-- Zero-configuration table creation
-- Automatic schema detection from JSON
-- Event-driven table routing
-- Handles ANY JSON structure without code changes
-- Configurable routing field and table naming
-
-### 4. Iceberg Source - DataStream (`iceberg-source-datastream-sample`)
-**Best for: Reading Iceberg tables and streaming to Kinesis**
-
-- Uses FLIP-27 IcebergSource for streaming/batch reads
-- Multiple starting strategies (latest, earliest, snapshot-based)
-- Watermark generation from Iceberg column statistics
-- Writes to Kinesis Data Stream as JSON
-
-**Key Features:**
-- Streaming reads from append-only Iceberg tables
-- Configurable monitor interval for new snapshots
-- Support for both Glue Catalog and S3 Tables
-- JSON serialization for downstream consumers
-
-**Important:** Streaming reads only work for APPEND-ONLY tables. Tables with upserts (equality deletes) are NOT supported for streaming.
-
-### 5. Iceberg Source - SQL (`iceberg-source-sql-sample`)
-**Best for: SQL-first approach to reading Iceberg tables**
-
-- Flink SQL for reading Iceberg tables
-- SQL hints for streaming/batch configuration
-- Branch and tag reading support
-- Metadata table queries ($snapshots, $history, $files)
-- Writes to Kinesis using SQL connector
-
-**Key Features:**
-- Declarative SQL-based pipeline
-- Time travel queries (snapshot-id, as-of-timestamp)
-- Branch and tag support for data versioning
-- Easy integration with existing SQL workflows
-
-### 6. Hybrid Source (`hybrid-source-sample`)
-**Best for: Backfilling and migration scenarios**
-
-- Bootstrap from Iceberg historical data (bounded)
-- Seamlessly switch to Kinesis real-time streaming (unbounded)
-- Single unified pipeline for both historical and real-time data
-
-**Use Cases:**
-- Backfilling a new streaming application with historical data
-- Recovering from extended downtime without data loss
-- Migrating from batch to streaming processing
-
-**Key Features:**
-- Flink HybridSource pattern
-- Automatic switchover when historical read completes
-- Unified output to Kinesis sink
+---
 
 ## Prerequisites
-### For Local Development
-- Java 11 or later
-- Apache Maven 3.6+
-- Docker and Docker Compose
+
+**Local development**
+- Java 17+
+- Apache Maven 3.9+
+- Docker (for the local Postgres; also used by CDK bundling)
 - AWS CLI configured with credentials
-- IntelliJ IDEA (recommended) or your preferred IDE
+- IntelliJ IDEA or VS Code with Java support
 
-### For AWS Deployment
-- AWS Account with appropriate permissions
-- AWS CDK CLI: `npm install -g aws-cdk`
+**AWS deployment**
+- AWS CDK CLI (`npm install -g aws-cdk`)
 - Node.js 18+ and npm
-- Docker (for building application JARs)
-- AWS CLI configured with credentials and default region
+- Docker running (CDK bundles the Flink JARs inside a Maven image)
 
-### Required AWS Permissions
-Your AWS credentials need permissions for:
-- Amazon Kinesis Data Streams
-- Amazon S3
-- AWS Glue (Data Catalog)
-- AWS Managed Flink (Kinesis Analytics V2)
-- Amazon RDS (if deploying with maintenance)
-- Amazon VPC (if deploying with maintenance)
-- AWS CloudFormation
-- IAM (for creating service roles)
+---
 
-## Quick Start - Local Development
+## Quick start — local
 
-### 1. Clone and Build
+### 1. Build everything
 ```bash
-git clone <repository-url>
-cd iceberg-flink-samples
 mvn clean package -DskipTests
 ```
 
-### 2. Start PostgreSQL (for maintenance)
+### 2. Start local Postgres (only needed for the DataStream sample with maintenance)
 ```bash
 docker-compose up -d
 ```
 
-### 3. Configure Local Properties
-Edit `src/main/resources/flink-application-properties-dev.json` in your chosen sample:
+### 3. Configure local properties
+Edit `src/main/resources/flink-application-properties-dev.json` in the sample you want to run:
 ```json
-{
+[{
   "PropertyGroupId": "FlinkApplicationProperties",
   "PropertyMap": {
-    "kinesis.stream.arn": "arn:aws:kinesis:REGION:ACCOUNT:stream/YOUR-STREAM",
-    "iceberg.warehouse": "s3://YOUR-BUCKET/warehouse",
+    "kinesis.stream.arn": "arn:aws:kinesis:us-east-1:123456789012:stream/iceberg-events-datastream",
+    "kinesis.region": "us-east-1",
     "aws.region": "us-east-1",
-    "iceberg.database": "iceberg_samples"
+    "iceberg.warehouse": "s3://your-bucket/warehouse",
+    "iceberg.database": "iceberg_samples",
+    "iceberg.table": "orders"
   }
-}
+}]
 ```
 
-### 4. Run a Flink Application
-Open in IntelliJ and select a run configuration:
-- `DataStreamIcebergJob` - DataStream API with maintenance
-- `FlinkSqlIcebergJob` - SQL API with multi-table routing
-- `DynamicSinkJob` - Dynamic routing with schema evolution
+### 4. Run a job
+From an IDE: pick one of the shipped run configurations in `.run/`.
 
-Configuration is in `src/main/resources/flink-application-properties-dev.json` for each app.
-
-Or run from command line:
+From the command line:
 ```bash
-# DataStream API
-java -jar datastream-sample/target/datastream-sample-1.0-SNAPSHOT.jar
-
-# SQL API
-java -jar flink-sql-sample/target/flink-sql-sample-1.0-SNAPSHOT.jar
-
-# Dynamic Sink
-java -jar dynamic-sink-sample/target/dynamic-sink-sample-1.0-SNAPSHOT.jar
+./run-local.sh datastream-sample
+./run-local.sh dynamic-sink-avro-sample
+./run-local.sh flink-sql-sample
 ```
 
-### 5. Generate Test Data
+The Web UI port differs per sample so you can run several at once:
 
-The data generator creates realistic e-commerce events and sends them to Kinesis:
+| Sample | Port |
+|---|---|
+| `datastream-sample` | 8081 |
+| `dynamic-sink-sample` | 8082 |
+| `dynamic-sink-avro-sample` | 8083 |
+| `flink-sql-sample` | 8084 |
+| `iceberg-source-datastream-sample` | 8085 |
+| `hybrid-source-sample` | 8086 |
+
+(`iceberg-source-sql-sample` sets its runtime mode before environment creation and doesn't open the Web UI automatically; pass `-Drest.port=…` as a JVM flag if you need it locally.)
+
+### 5. Generate data
 
 ```bash
-# Build the data generator
-mvn clean package -pl data-generator -am -DskipTests
+# JSON events (used by DataStream, SQL, Dynamic)
+java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar \
+     iceberg-events-datastream us-east-1 100 60 v1
 
-# Run with default settings (V1 schema, continuous mode)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar <stream-name> <region> <events-per-second>
-
-# Run for specific duration with V1 schema (no optional fields)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar iceberg-events-datastream us-east-1 100 60 v1
-
-# Run with V2 schema (includes optional fields like userAgent, scrollDepth)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar iceberg-events-datastream us-east-1 100 60 v2
+# Same generator, Avro output with GSR schema registration (used by Dynamic Avro)
+java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar \
+     avro iceberg-events-dynamic-avro us-east-1 iceberg-dynamic-avro 100 60
 ```
 
-**Arguments:**
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `stream-name` | Yes | Name of the Kinesis stream |
-| `region` | Yes | AWS region (e.g., us-east-1) |
-| `events-per-second` | Yes | Target event generation rate |
-| `duration-seconds` | No | Duration in seconds (-1 for continuous, default: -1) |
-| `schema-version` | No | `v1` or `v2` (default: v1) |
+Positional arguments:
 
-**Schema Versions:**
-- **v1**: Base schema without optional fields - use for initial data load
-- **v2**: Extended schema with optional fields (userAgent for UserEvents, scrollDepth for ClickEvents) - use to test schema evolution
+| Mode | Arguments |
+|---|---|
+| JSON (default) | `<stream> <region> <events/sec> [duration-s] [v1\|v2]` |
+| Avro | `avro <stream> <region> <registry-name> [events/sec] [duration-s]` |
 
-**Event Types Generated:**
-- **OrderEvent** (40%): E-commerce orders with amount, currency, status
-- **UserEvent** (30%): User actions like login, signup, profile updates
-- **ClickEvent** (30%): Clickstream data with page URLs and session info
+The JSON generator supports `v1` (no optional fields) and `v2` (adds `userAgent`, `scrollDepth`) for schema-evolution testing. The Avro generator registers schemas on first use and writes GSR-wrapped Avro bytes.
 
-**Built-in Test Scenarios:**
-- 10% duplicate keys (for upsert testing)
-- 5% late-arriving events (for watermark testing)
-- Schema evolution based on version parameter
-
-### 6. Access Flink UI
-- DataStream: http://localhost:8081
-- SQL: http://localhost:8082
-- Dynamic: http://localhost:8083
-
-Monitor job progress, checkpoints, and backpressure in the Flink Web UI.
-
-### 7. Query Data with Athena
-```sql
--- Query orders table (DataStream)
-SELECT * FROM iceberg_samples.orders 
-WHERE order_date >= current_date - interval '1' day
-LIMIT 10;
-
--- Query SQL tables
-SELECT * FROM iceberg_samples.sql_orders LIMIT 10;
-SELECT * FROM iceberg_samples.sql_users LIMIT 10;
-SELECT * FROM iceberg_samples.sql_clicks LIMIT 10;
-
--- Check table metadata
-SELECT * FROM iceberg_samples.orders$snapshots;
-SELECT * FROM iceberg_samples.orders$files;
-```
+---
 
 ## Deploy to AWS
 
-### Step 1: Bootstrap CDK (First Time Only)
+### One-time CDK bootstrap
 ```bash
 cd cdk-infrastructure
 npm install
-cdk bootstrap aws://ACCOUNT-ID/REGION
+npx cdk bootstrap aws://<account-id>/<region>
 ```
 
-### Step 2: Choose Your Deployment
+### Deploy a sample
+All deployments go through one stack, `IcebergFlinkStack`, parameterized by CDK context keys. Pick the sample with `-c appType=<name>` and the catalog with `-c catalogType=glue|s3tables` (default `glue`). Most samples also accept optional flags.
 
-#### Option A: DataStream with Maintenance (Recommended for Production)
-```bash
-cdk deploy -c appType=datastream -c enableMaintenance=true
-```
+| Goal | Command |
+|---|---|
+| DataStream sink to Glue, no maintenance | `npx cdk deploy -c appType=datastream` |
+| DataStream sink to Glue, with in-job maintenance (JDBC lock) | `npx cdk deploy -c appType=datastream -c enableMaintenance=true` |
+| DataStream sink to S3 Tables (managed maintenance) | `npx cdk deploy -c appType=datastream -c catalogType=s3tables` |
+| Flink SQL multi-table routing | `npx cdk deploy -c appType=sql` |
+| Dynamic sink (JSON), Glue | `npx cdk deploy -c appType=dynamic` |
+| Dynamic sink (Avro + GSR), Glue | `npx cdk deploy -c appType=dynamic-avro` |
+| Dynamic sink (Avro + GSR), S3 Tables | `npx cdk deploy -c appType=dynamic-avro -c catalogType=s3tables` |
+| Iceberg source → Kinesis (DataStream) | `npx cdk deploy -c appType=iceberg-source` |
+| Iceberg source → Kinesis (SQL) | `npx cdk deploy -c appType=iceberg-source-sql` |
+| Hybrid source: Iceberg bootstrap + Kinesis streaming | `npx cdk deploy -c appType=hybrid` |
 
-**Deploys:**
-- Kinesis Data Stream
-- S3 warehouse bucket
-- Glue database
-- VPC with private subnets and NAT Gateway
-- RDS PostgreSQL for distributed locking
-- Managed Flink application with VPC connectivity
+Additional context flags:
 
-**Cost:** ~$6-7/day
+| Flag | Applies to | Purpose |
+|---|---|---|
+| `-c enableMaintenance=true` | `datastream` + `glue` | Provisions RDS and runs `ExpireSnapshots` / `RewriteDataFiles` / `DeleteOrphanFiles` inside the Flink job, coordinated by a JDBC lock |
+| `-c catalogType=s3tables` | any write-path sample | Uses S3 Tables instead of Glue Catalog |
+| `-c writeMode=upsert\|append` | `datastream` | Sink mode (default `upsert`) |
+| `-c tableFormatVersion=2\|3` | `datastream` | Override the table format version at creation time (default `2` — see "Delete files and format versions") |
+| `-c sourceDatabase=…`, `-c sourceTable=…`, `-c sourceWarehouse=…`, `-c sourceTableBucketArn=…` | source apps | Point source apps at an existing Iceberg table rather than creating a new empty one |
+| `-c stackSuffix=…` | any | Suffix applied to stack-scoped resource names so multiple variants can coexist |
+| `-c cdkBootstrapQualifier=…` | any | Override the CDK bootstrap qualifier if you've used a non-default `cdk bootstrap` |
 
-#### Option B: DataStream without Maintenance
-```bash
-cdk deploy -c appType=datastream -c enableMaintenance=false
-```
+After deployment, note the stack outputs (`ApplicationName`, `KinesisSourceStreamName`, `WarehouseBucket`, `GlueDatabaseName` or `S3TableBucketName`) and start the application:
 
-**Deploys:**
-- Kinesis, S3, Glue, Flink application
-- No VPC or RDS
-
-**Cost:** ~$5-6/day
-
-#### Option C: SQL API
-```bash
-cdk deploy -c appType=sql
-```
-
-**Deploys:**
-- Kinesis, S3, Glue, Flink application
-- Multi-table routing with SQL
-
-**Cost:** ~$5-6/day
-
-#### Option D: Dynamic Sink
-```bash
-cdk deploy -c appType=dynamic
-```
-
-**Deploys:**
-- Kinesis, S3, Glue, Flink application
-- Dynamic table creation
-
-**Cost:** ~$5-6/day
-
-#### Option E: DataStream with S3 Tables (Native Iceberg)
-```bash
-cdk deploy -c appType=datastream -c catalogType=s3tables
-```
-
-**Deploys:**
-- Kinesis Data Stream
-- S3 Table Bucket (native Iceberg storage)
-- S3 Tables namespace
-- Managed Flink application
-
-**Key Benefits:**
-- S3 Tables handles compaction and maintenance automatically
-- No need for RDS or VPC for maintenance coordination
-- Native Iceberg support with automatic optimization
-- Simplified operations
-
-**Note:** S3 Tables is not compatible with `enableMaintenance=true` since it handles maintenance automatically.
-
-**Cost:** ~$5-6/day (plus S3 Tables storage costs)
-
-#### Option F: Dynamic Sink with S3 Tables
-```bash
-cdk deploy -c appType=dynamic -c catalogType=s3tables
-```
-
-**Deploys:**
-- Kinesis, S3 Table Bucket, Flink application
-- Dynamic table creation with S3 Tables
-
-**Cost:** ~$5-6/day
-
-#### Option G: SQL API with S3 Tables
-```bash
-cdk deploy -c appType=sql -c catalogType=s3tables
-```
-
-**Deploys:**
-- Kinesis Data Stream
-- S3 Table Bucket (native Iceberg storage)
-- Managed Flink application with SQL multi-table routing
-
-**Cost:** ~$5-6/day
-
-#### Option H: Iceberg Source (Read from Iceberg, Write to Kinesis)
-```bash
-cdk deploy -c appType=iceberg-source
-```
-
-**Deploys:**
-- S3 warehouse bucket and Glue database (or S3 Tables)
-- Kinesis Data Stream for output
-- Managed Flink application reading from Iceberg
-
-**Note:** Requires an existing Iceberg table with data. Streaming reads only work for append-only tables.
-
-**Cost:** ~$5-6/day
-
-#### Option I: Iceberg Source SQL
-```bash
-cdk deploy -c appType=iceberg-source-sql
-```
-
-**Deploys:**
-- S3 warehouse bucket and Glue database (or S3 Tables)
-- Kinesis Data Stream for output
-- Managed Flink application with SQL-based Iceberg reading
-
-**Cost:** ~$5-6/day
-
-#### Option J: Hybrid Source (Bootstrap + Streaming)
-```bash
-cdk deploy -c appType=hybrid
-```
-
-**Deploys:**
-- S3 warehouse bucket and Glue database (or S3 Tables)
-- Kinesis Data Stream for source (after bootstrap)
-- Kinesis Data Stream for sink output
-- Managed Flink application with hybrid source pattern
-
-**Use Case:** Start by reading all historical data from Iceberg, then seamlessly switch to real-time Kinesis streaming.
-
-**Cost:** ~$6-7/day (two Kinesis streams)
-
-### Step 3: Note the Outputs
-CDK will output important values:
-```
-Outputs:
-IcebergFlinkStack.ApplicationName = iceberg-flink-datastream
-IcebergFlinkStack.KinesisStreamName = iceberg-events-datastream
-IcebergFlinkStack.WarehouseBucket = iceberg-warehouse-datastream-123456789
-IcebergFlinkStack.GlueDatabaseName = iceberg_datastream
-```
-
-### Step 4: Start the Flink Application
 ```bash
 aws kinesisanalyticsv2 start-application \
-  --application-name iceberg-flink-datastream \
-  --run-configuration '{}'
+  --application-name iceberg-flink-<appType> \
+  --run-configuration 'ApplicationRestoreConfiguration={ApplicationRestoreType=SKIP_RESTORE_FROM_SNAPSHOT}'
 ```
 
-### Step 5: Generate Test Data
+Then feed it data with the data generator (see above), pointing at the Kinesis stream from the outputs.
 
-Get the Kinesis stream name from CDK outputs and run the data generator:
+---
 
-```bash
-# Get stream name from CDK output
-STREAM_NAME=$(aws cloudformation describe-stacks \
-  --stack-name IcebergFlinkStack \
-  --query 'Stacks[0].Outputs[?OutputKey==`KinesisSourceStreamName`].OutputValue' \
-  --output text)
+## Querying the tables
 
-# Generate V1 schema events (100 events/sec for 60 seconds)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar $STREAM_NAME us-east-1 100 60 v1
+Athena works out of the box with Glue Catalog and supports Iceberg metadata tables:
 
-# Or generate V2 schema events (with optional fields for schema evolution testing)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar $STREAM_NAME us-east-1 100 60 v2
-
-# Continuous mode (runs until stopped with Ctrl+C)
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar $STREAM_NAME us-east-1 50 -1 v1
-```
-
-**Tip:** Start with V1 schema to establish baseline tables, then switch to V2 to test schema evolution.
-
-### Step 6: Monitor the Application
-```bash
-# Check application status
-aws kinesisanalyticsv2 describe-application \
-  --application-name iceberg-flink-datastream
-
-# View CloudWatch logs
-aws logs tail /aws/kinesisanalytics/iceberg-flink-datastream --follow
-```
-
-### Step 7: Query Data with Athena
 ```sql
--- Query your data
-SELECT COUNT(*) as total_orders,
-       SUM(total_amount) as revenue
-FROM iceberg_datastream.orders
-WHERE order_date >= current_date - interval '1' day;
-
--- Check snapshots
-SELECT snapshot_id, 
-       committed_at,
-       operation,
-       summary
+-- Snapshot history
+SELECT snapshot_id, committed_at, operation
 FROM iceberg_datastream.orders$snapshots
-ORDER BY committed_at DESC
-LIMIT 10;
+ORDER BY committed_at DESC;
+
+-- Data files and their sizes
+SELECT content, file_path, record_count, file_size_in_bytes
+FROM iceberg_datastream.orders$files;
+
+-- Delete files (content: 0=data, 1=positional delete, 2=equality delete)
+SELECT content, file_path, record_count
+FROM iceberg_datastream.orders$delete_files;
 ```
 
-## Deployment Architecture
+For S3 Tables, use the `s3tables` catalog in Athena or any DV-aware engine (e.g. Spark on EMR 7.12+).
 
-### DataStream with Maintenance
-```
-Internet Gateway
-       │
-       ▼
-   NAT Gateway (Public Subnet)
-       │
-       ▼
-Flink Application (Private Subnet)
-       │
-       ├──▶ Kinesis (Read events)
-       ├──▶ S3 (Write Iceberg data)
-       ├──▶ Glue (Register tables)
-       └──▶ RDS PostgreSQL (Maintenance locks)
-```
+---
 
-### SQL/Dynamic (No VPC)
-```
-Flink Application (Managed)
-       │
-       ├──▶ Kinesis (Read events)
-       ├──▶ S3 (Write Iceberg data)
-       └──▶ Glue (Register tables)
-```
+## Delete files and format versions
 
-## Configuration Details
+Flink 1.10's Iceberg sink writes **equality delete files** (across checkpoints, keyed on the primary key) and **positional delete files** (within a checkpoint, for rows superseded in the in-progress data file). These are Iceberg v2 artefacts.
 
-### Application Properties
-
-Each application reads configuration from runtime properties:
-
-**Common Properties:**
-```json
-{
-  "aws.region": "us-east-1",
-  "iceberg.warehouse": "s3://bucket/warehouse",
-  "iceberg.catalog.name": "glue_catalog",
-  "iceberg.catalog.type": "glue",
-  "iceberg.database": "iceberg_samples",
-  "checkpoint.interval.ms": "60000"
-}
-```
-
-**Catalog Types:**
-- `glue` (default): Uses AWS Glue Data Catalog for metadata, S3 for data storage
-- `s3tables`: Uses S3 Tables for native Iceberg storage with automatic maintenance
-
-**S3 Tables Specific:**
-```json
-{
-  "iceberg.catalog.type": "s3tables",
-  "iceberg.catalog.name": "s3tables_catalog",
-  "s3tables.bucket.arn": "arn:aws:s3tables:region:account:bucket/bucket-name"
-}
-```
-
-**DataStream Specific:**
-```json
-{
-  "kinesis.stream.arn": "arn:aws:kinesis:...",
-  "iceberg.table": "orders",
-  "enable.maintenance": "true",
-  "rds.jdbc.url": "jdbc:postgresql://host:5432/iceberg_locks",
-  "rds.user": "flink",
-  "rds.password": "{{resolve:secretsmanager:<secret-arn>:SecretString:password}}"
-}
-```
-
-> **Note:** The RDS password is auto-generated by AWS Secrets Manager during CDK deployment. You can customize the password configuration in `cdk-infrastructure/lib/iceberg-flink-stack.ts`.
-
-**SQL Specific:**
-```json
-{
-  "kinesis.stream.name": "iceberg-events-sql",
-  "table.prefix": "sql_"
-}
-```
-
-### Maintenance Configuration (DataStream)
-
-When `enable.maintenance=true`, the application runs coordinated maintenance:
-
-**Snapshot Expiration:**
-- Trigger: Every 10 commits
-- Retention: 5 snapshots minimum
-- Max age: 24 hours
-- Removes old metadata and data files
-
-**Data File Compaction:**
-- Trigger: Every 20 small files
-- Target size: 256 MB
-- Combines small files for better query performance
-
-**Orphan File Cleanup:**
-- Trigger: Every 50 commits
-- Min age: 3 days
-- Removes unreferenced data files
-
-**Locking:**
-- Uses JDBC-based distributed locks
-- Prevents concurrent maintenance conflicts
-- Configurable lock timeout and retry
-
-## Project Structure
+In v3, positional delete *files* are replaced by **deletion vectors** (Puffin bitmaps). Equality deletes remain as Parquet files — the v3 spec keeps them because streaming writers that don't read existing data cannot emit positional deletes. In Flink 1.10, the sink has no DV-aware writer, so a Flink upsert job against a v3 table writes v2-style positional delete files and the commit fails with:
 
 ```
-iceberg-flink-samples/
-├── datastream-sample/              # DataStream API with IcebergSink
-│   ├── src/main/java/             # Application code
-│   ├── src/test/java/             # Property-based tests
-│   └── src/main/resources/        # Configuration files
-├── flink-sql-sample/              # Flink SQL API
-│   ├── src/main/java/             # SQL application code
-│   ├── src/test/java/             # Upsert semantics tests
-│   └── sql/                       # DDL statements
-├── dynamic-sink-sample/           # Dynamic Iceberg Sink (Schema-Agnostic)
-│   └── src/main/java/             # Dynamic routing logic
-├── iceberg-source-datastream-sample/     # Iceberg Source (DataStream API)
-│   └── src/main/java/             # FLIP-27 IcebergSource to Kinesis
-├── iceberg-source-sql-sample/            # Iceberg Source (SQL API)
-│   └── src/main/java/             # SQL-based Iceberg reading
-├── hybrid-source-sample/          # Hybrid Source (Iceberg + Kinesis)
-│   └── src/main/java/             # Bootstrap from Iceberg, stream from Kinesis
-├── data-generator/                # Test data generator
-│   └── src/main/java/             # Event generation
-├── shared-common/                 # Shared utilities
-│   ├── model/                     # Event POJOs
-│   ├── config/                    # Iceberg configuration
-│   └── util/                      # Serializers and converters
-├── cdk-infrastructure/            # AWS CDK deployment
-│   ├── lib/                       # Stack definitions
-│   └── bin/                       # CDK app entry point
-├── .run/                          # IntelliJ run configurations
-├── docker-compose.yml             # Local PostgreSQL
-└── pom.xml                        # Parent POM
+java.lang.IllegalArgumentException: Must use DVs for position deletes in V3
+    at org.apache.iceberg.MergingSnapshotProducer.validateNewDeleteFile(...)
+    at org.apache.iceberg.flink.sink.IcebergCommitter.commitDeltaTxn(...)
 ```
 
-## Key Features Demonstrated
+Flink SQL is even stricter and rejects `format-version=3` up front with "UPSERT requires v2 table format". For these reasons **every sample uses v2 by default**. The DataStream sample exposes `-c tableFormatVersion=3` for testing purposes; use it if you want to reproduce the commit failure. Once Flink's Iceberg sink gains a DV writer (already on `iceberg` `main`), v3 will work end-to-end.
 
-### Iceberg 1.10 Features
-- ✅ Table format v2 with delete vectors
-- ✅ Equality deletes for upsert operations
-- ✅ Partitioned tables (date and region)
-- ✅ Schema evolution (Dynamic Sink)
-- ✅ Snapshot management and time travel
-- ✅ Metadata optimization
+You still get DV benefits on the read side when compaction (`RewriteDataFiles`) rewrites accumulated delete files into DVs on a v3 table.
 
-### Flink 1.20 Features
-- ✅ IcebergSink (SinkV2) for DataStream
-- ✅ Iceberg SQL connector for Table API
-- ✅ Exactly-once semantics with checkpointing
-- ✅ Backpressure handling
-- ✅ State management
+---
 
-### AWS Integration
-- ✅ Glue Catalog for metadata
-- ✅ S3 Tables for native Iceberg storage (alternative to Glue)
-- ✅ S3 for data storage
-- ✅ Kinesis for event streaming
-- ✅ VPC connectivity for RDS
-- ✅ CloudWatch for monitoring
-- ✅ IAM for security
+## Maintenance options
 
-### Production Patterns
-- ✅ Distributed maintenance coordination
-- ✅ Error handling and retry logic
-- ✅ Monitoring and observability
-- ✅ Property-based testing
-- ✅ Configuration management
-- ✅ Infrastructure as Code (CDK)
+| Catalog | Maintenance |
+|---|---|
+| **Amazon S3 Tables** | Automatic — the service handles compaction and snapshot management. `-c enableMaintenance=true` is rejected when `catalogType=s3tables`. |
+| **AWS Glue Data Catalog — auto-compaction enabled on the database** | Automatic compaction by Glue. No Flink code required. |
+| **AWS Glue Data Catalog — in-job** | `-c appType=datastream -c enableMaintenance=true`. Provisions an RDS PostgreSQL for a JDBC lock and adds `ExpireSnapshots` + `RewriteDataFiles` + `DeleteOrphanFiles` operators to the Flink job. |
+
+The in-job schedule in `datastream-sample`:
+
+```java
+.add(ExpireSnapshots.builder()
+     .scheduleOnCommitCount(10).maxSnapshotAge(Duration.ofHours(24)).retainLast(5))
+.add(RewriteDataFiles.builder()
+     .scheduleOnDataFileCount(20)
+     .targetFileSizeBytes(256 * 1024 * 1024).minFileSizeBytes(32 * 1024 * 1024)
+     .partialProgressEnabled(true))
+.add(DeleteOrphanFiles.builder()
+     .scheduleOnCommitCount(50).minAge(Duration.ofDays(3)))
+```
+
+---
 
 ## Testing
 
-### Unit and Property-Based Tests
 ```bash
-# Run all tests
+# Compile everything
+mvn clean package -DskipTests
+
+# Run unit and property-based tests (jqwik)
 mvn test
 
-# Run specific module tests
-mvn test -pl datastream-sample
+# Run a single module's tests
+mvn -pl datastream-sample test
 
-# Run with coverage
-mvn test jacoco:report
+# Static analysis (SpotBugs + FindSecBugs). May be limited on very recent JDKs.
+mvn spotbugs:check
 ```
 
-### Property-Based Tests
-The samples include property-based tests using jqwik:
-- **Data Integrity**: Verifies upsert semantics
-- **Compaction**: Tests file consolidation
-- **Snapshot Expiration**: Validates retention policies
-- **Orphan Cleanup**: Ensures no data loss
+The property tests model the upsert, compaction, snapshot-expiration, and orphan-cleanup invariants directly; they run in seconds and don't need AWS credentials.
 
-### Integration Testing
+---
+
+## Operations and troubleshooting
+
+**Start / stop the Flink application**
 ```bash
-# Start local environment
-docker-compose up -d
+aws kinesisanalyticsv2 start-application --application-name iceberg-flink-<type> \
+  --run-configuration 'ApplicationRestoreConfiguration={ApplicationRestoreType=SKIP_RESTORE_FROM_SNAPSHOT}'
 
-# Run application locally
-java -jar datastream-sample/target/datastream-sample-1.0-SNAPSHOT.jar
-
-# Generate test data
-java -jar data-generator/target/data-generator-1.0-SNAPSHOT.jar
-
-# Query results
-aws athena start-query-execution \
-  --query-string "SELECT COUNT(*) FROM iceberg_samples.orders" \
-  --result-configuration "OutputLocation=s3://your-bucket/results/"
+aws kinesisanalyticsv2 stop-application --application-name iceberg-flink-<type> --force
 ```
 
-## Monitoring and Observability
-
-### CloudWatch Metrics
-The Flink applications emit metrics to CloudWatch:
-- Records processed per second
-- Checkpoint duration and size
-- Backpressure indicators
-- Task manager resource utilization
-
-### CloudWatch Logs
-Application logs are streamed to CloudWatch Logs:
+**Watch logs**
 ```bash
-# Tail application logs
-aws logs tail /aws/kinesisanalytics/iceberg-flink-datastream --follow
-
-# Filter for errors
-aws logs filter-log-events \
-  --log-group-name /aws/kinesisanalytics/iceberg-flink-datastream \
-  --filter-pattern "ERROR"
+aws logs tail /aws/kinesisanalytics/iceberg-flink-<type> --follow
 ```
 
-### Flink Metrics
-Access Flink's built-in metrics via the REST API:
+**See what the sink is writing**
 ```bash
-# Get job metrics
-curl http://localhost:8081/jobs/<job-id>/metrics
-
-# Get checkpoint statistics
-curl http://localhost:8081/jobs/<job-id>/checkpoints
+aws s3 ls s3://<warehouse-bucket>/warehouse/<db>/<table>/ --recursive | tail -40
 ```
 
-### Iceberg Metadata
-Query Iceberg metadata tables:
-```sql
--- View snapshots
-SELECT * FROM iceberg_samples.orders$snapshots;
+Then look at `$files` and `$delete_files` via Athena to see the file mix.
 
--- View data files
-SELECT * FROM iceberg_samples.orders$files;
-
--- View manifests
-SELECT * FROM iceberg_samples.orders$manifests;
-
--- View partitions
-SELECT * FROM iceberg_samples.orders$partitions;
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue: Application fails to start**
-```bash
-# Check application status
-aws kinesisanalyticsv2 describe-application \
-  --application-name iceberg-flink-datastream
-
-# Check CloudWatch logs for errors
-aws logs tail /aws/kinesisanalytics/iceberg-flink-datastream --since 10m
-```
-
-**Issue: No data in Iceberg tables**
-```bash
-# Verify Kinesis stream has data
-aws kinesis get-records \
-  --shard-iterator $(aws kinesis get-shard-iterator \
-    --stream-name iceberg-events-datastream \
-    --shard-id shardId-000000000000 \
-    --shard-iterator-type LATEST \
-    --query 'ShardIterator' --output text)
-
-# Check Flink job is running
-aws kinesisanalyticsv2 describe-application \
-  --application-name iceberg-flink-datastream \
-  --query 'ApplicationDetail.ApplicationStatus'
-```
-
-**Issue: Maintenance tasks failing**
-```bash
-# Check RDS connectivity
-aws rds describe-db-instances \
-  --db-instance-identifier <instance-id>
-
-# Verify security group rules
-aws ec2 describe-security-groups \
-  --group-ids <flink-sg-id> <rds-sg-id>
-```
-
-**Issue: High costs**
-```bash
-# Stop Flink application when not in use
-aws kinesisanalyticsv2 stop-application \
-  --application-name iceberg-flink-datastream
-
-# Delete stack to remove all resources
-cdk destroy
-```
-
-## Cost Optimization
-
-### Development/Testing
-- Stop Flink applications when not in use
-- Use smaller RDS instances (t3.micro)
-- Reduce Kinesis shard count to 1
-- Set S3 lifecycle policies for old data
-
-### Production
-- Enable auto-scaling for Flink (2-8 KPUs)
-- Use Reserved Instances for RDS
-- Implement data retention policies
-- Monitor and optimize checkpoint intervals
-
-### Estimated Costs (us-east-1)
-
-**DataStream with Maintenance:**
-- Flink: 2 KPUs × $0.11/hour = $5.28/day
-- Kinesis: 2 shards × $0.015/hour = $0.72/day
-- RDS t3.micro: $0.017/hour = $0.41/day
-- NAT Gateway: $0.045/hour = $1.08/day
-- S3: ~$0.10/day (varies with data volume)
-- **Total: ~$7.59/day**
-
-**SQL/Dynamic (No VPC):**
-- Flink: 2 KPUs × $0.11/hour = $5.28/day
-- Kinesis: 2 shards × $0.015/hour = $0.72/day
-- S3: ~$0.10/day
-- **Total: ~$6.10/day**
-
-## Cleanup
-
-### Stop Application
-```bash
-aws kinesisanalyticsv2 stop-application \
-  --application-name iceberg-flink-datastream
-```
-
-### Delete Stack
+**Tear everything down**
 ```bash
 cd cdk-infrastructure
-cdk destroy
+npx cdk destroy
 ```
 
-### Manual Cleanup (if needed)
-```bash
-# Delete S3 bucket contents
-aws s3 rm s3://iceberg-warehouse-datastream-123456789 --recursive
+---
 
-# Delete Kinesis stream
-aws kinesis delete-stream --stream-name iceberg-events-datastream
-```
+## Cost notes
 
-## Configuration
+Rough per-day cost in `us-east-1` while running:
+
+| Deployment | Approx cost/day |
+|---|---|
+| SQL / dynamic / source-only (no VPC, no RDS) | **~$6** |
+| DataStream without maintenance | **~$6** |
+| DataStream with in-job maintenance (adds RDS t3.micro + NAT Gateway) | **~$8** |
+| S3 Tables variants | **~$6** plus S3 Tables storage |
+
+Drivers are Managed Flink (~$5.28/day for 2 KPUs), Kinesis shards (~$0.72/day for 2 shards), NAT Gateway when maintenance is enabled (~$1.08/day), and S3 storage (variable). Stop or destroy the stack when you're not actively testing.
+
+---
+
+## Contributing
+
+The samples are intentionally small and self-contained so each one can be read top-to-bottom. If you're adding a new sample:
+
+1. Inherit from the parent `pom.xml`, depend on `shared-common`, and use the `runtime/` helpers (`FlinkEnvironments`, `AppProperties`, `Checkpointing`, `KinesisSources`) rather than reimplementing bootstrapping.
+2. Put any cross-sample code in `shared-common` rather than duplicating it.
+3. Give every operator an explicit `uid()` and a human `name()` — the Flink production-readiness guide expects it and it keeps checkpoint state portable across job-graph changes.
+4. Add the new sample to `cdk-infrastructure/lib/iceberg-flink-stack.ts` so it shares the CDK infrastructure.
+
+---
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

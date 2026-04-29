@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "UserEvent",
+  "namespace": "com.aws.samples.iceberg.events",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-micros"}},
+    {"name": "event_type", "type": "string"},
+    {"name": "region", "type": "string"},
+    {"name": "event_date", "type": {"type": "int", "logicalType": "date"}},
+    {"name": "user_id", "type": "string"},
+    {"name": "action", "type": "string"},
+    {"name": "device_type", "type": "string"},
+    {"name": "ip_address", "type": "string"},
+    {"name": "user_agent", "type": ["null", "string"], "default": null}
+  ]
+}

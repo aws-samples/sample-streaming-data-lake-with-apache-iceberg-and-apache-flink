@@ -13,10 +13,25 @@ const enableMaintenance = app.node.tryGetContext('enableMaintenance') === 'true'
 const catalogType = app.node.tryGetContext('catalogType') || 'glue';
 const enableNag = app.node.tryGetContext('enableNag') !== 'false'; // Enable by default
 
-const stack = new IcebergFlinkStack(app, 'IcebergFlinkStack', {
-  appType: appType as 'datastream' | 'sql' | 'dynamic' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid',
+// Source-app specific context (iceberg-source, iceberg-source-sql, hybrid):
+// Override to read from an existing Iceberg table instead of the auto-created one.
+const sourceDatabase = app.node.tryGetContext('sourceDatabase');
+const sourceTable = app.node.tryGetContext('sourceTable');
+const sourceWarehouse = app.node.tryGetContext('sourceWarehouse');
+const sourceTableBucketArn = app.node.tryGetContext('sourceTableBucketArn');
+
+// Optional: stack name suffix to allow co-existing deployments (e.g., for testing
+// source apps that read from another deployment's Iceberg tables)
+const stackSuffix = app.node.tryGetContext('stackSuffix') || '';
+
+const stack = new IcebergFlinkStack(app, `IcebergFlinkStack${stackSuffix ? '-' + stackSuffix : ''}`, {
+  appType: appType as 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid',
   enableMaintenance: enableMaintenance,
   catalogType: catalogType as 'glue' | 's3tables',
+  sourceDatabase,
+  sourceTable,
+  sourceWarehouse,
+  sourceTableBucketArn,
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION || 'us-east-1',
