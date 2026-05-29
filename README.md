@@ -26,7 +26,7 @@ Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is 
 | `iceberg-source-sql-sample` | Table / SQL | Read Iceberg with SQL hints, write rows to Kinesis | Iceberg SQL connector | Supports branches, tags, time travel via SQL hints |
 | `hybrid-source-sample` | DataStream | Bootstrap from Iceberg, switch to Kinesis streaming | `HybridSource` | Backfill-then-stream for migrations |
 
-All write-path samples use Iceberg format version 2. See the "Delete files and format versions" section below for why — short version: Flink 1.10's Iceberg sink does not write deletion vectors, and v3 requires them for positional deletes.
+All write-path samples use Iceberg format version 3 by default. With Apache Iceberg 1.11.0 the Flink sink writes deletion vectors natively for v3 tables. See the "Delete files and format versions" section below for reader-compatibility notes (Amazon Athena does not yet support v3).
 
 ---
 
@@ -229,7 +229,7 @@ Additional context flags:
 | `-c enableMaintenance=true` | `datastream` + `glue` | Provisions RDS and runs `ExpireSnapshots` / `RewriteDataFiles` / `DeleteOrphanFiles` inside the Flink job, coordinated by a JDBC lock |
 | `-c catalogType=s3tables` | any write-path sample | Uses S3 Tables instead of Glue Catalog |
 | `-c writeMode=upsert\|append` | `datastream` | Sink mode (default `upsert`) |
-| `-c tableFormatVersion=2\|3` | `datastream` | Override the table format version at creation time (default `2` — see "Delete files and format versions") |
+| `-c tableFormatVersion=2\|3` | `datastream` | Override the table format version at creation time (default `3` — see "Delete files and format versions") |
 | `-c sourceDatabase=…`, `-c sourceTable=…`, `-c sourceWarehouse=…`, `-c sourceTableBucketArn=…` | source apps | Point source apps at an existing Iceberg table rather than creating a new empty one |
 | `-c stackSuffix=…` | any | Suffix applied to stack-scoped resource names so multiple variants can coexist |
 | `-c cdkBootstrapQualifier=…` | any | Override the CDK bootstrap qualifier if you've used a non-default `cdk bootstrap` |
@@ -271,19 +271,32 @@ For S3 Tables, use the `s3tables` catalog in Athena or any DV-aware engine (e.g.
 
 ## Delete files and format versions
 
-Flink 1.10's Iceberg sink writes **equality delete files** (across checkpoints, keyed on the primary key) and **positional delete files** (within a checkpoint, for rows superseded in the in-progress data file). These are Iceberg v2 artefacts.
+The Flink Iceberg sink writes **equality delete files** (across checkpoints, keyed on the primary key) and, for rows superseded within a single checkpoint, **positional deletes**. On a v2 table positional deletes are Parquet files; on a v3 table they become **deletion vectors** (Roaring bitmaps stored in Puffin format).
 
-In v3, positional delete *files* are replaced by **deletion vectors** (Puffin bitmaps). Equality deletes remain as Parquet files — the v3 spec keeps them because streaming writers that don't read existing data cannot emit positional deletes. In Flink 1.10, the sink has no DV-aware writer, so a Flink upsert job against a v3 table writes v2-style positional delete files and the commit fails with:
+Starting with **Apache Iceberg 1.11.0**, the Flink sink writes deletion vectors natively for v3 tables (`RowDataTaskWriterFactory` selects a DV writer when `TableUtil.formatVersion(table) > 2`). These samples target Iceberg 1.11.0 and default to `format-version=3`. Equality deletes remain Parquet files even on v3 — the spec keeps them because streaming writers that don't read existing data cannot compute positional deletes.
 
-```
-java.lang.IllegalArgumentException: Must use DVs for position deletes in V3
-    at org.apache.iceberg.MergingSnapshotProducer.validateNewDeleteFile(...)
-    at org.apache.iceberg.flink.sink.IcebergCommitter.commitDeltaTxn(...)
-```
+Validated on Amazon Managed Service for Apache Flink (Flink 2.2 runtime): a v3 table created by the DataStream sample writes deletion vectors (`POS_DEL` entries with `file_format=PUFFIN` and a `content_offset`) alongside equality delete files, confirmed via the snapshot summary (`added-dvs`) and manifest inspection.
 
-Flink SQL is even stricter and rejects `format-version=3` up front with "UPSERT requires v2 table format". For these reasons **every sample uses v2 by default**. The DataStream sample exposes `-c tableFormatVersion=3` for testing purposes; use it if you want to reproduce the commit failure. Once Flink's Iceberg sink gains a DV writer (already on `iceberg` `main`), v3 will work end-to-end.
+Override the table format version with `-c tableFormatVersion=2` if you need v2 (for example, to support a reader that does not yet handle v3).
 
-You still get DV benefits on the read side when compaction (`RewriteDataFiles`) rewrites accumulated delete files into DVs on a v3 table.
+### Reader compatibility
+
+V3 deletion vectors require a reader that supports the v3 spec. Per the [AWS S3 Apache Iceberg V3 guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/working-with-apache-iceberg-v3.html):
+
+| Engine | V3 support |
+|---|---|
+| Amazon EMR Spark | 7.12+ |
+| AWS Glue ETL | Yes |
+| Amazon SageMaker Unified Studio Notebooks | Yes |
+| AWS Glue Data Catalog / Amazon S3 Tables (REST + maintenance) | Yes |
+| Amazon Athena (Trino) | **No** — querying a v3 table returns `Cannot read unsupported version 3` |
+| Apache Flink (Iceberg 1.10+) | Yes (read), 1.11.0+ (DV write) |
+
+Verify your read engine before creating v3 tables that downstream consumers query. v2 → v3 is a one-way, in-place upgrade with no data rewrite (`ALTER TABLE ... SET TBLPROPERTIES ('format-version'='3')`).
+
+#### AWS SDK alignment on Managed Flink
+
+`iceberg-aws-bundle` 1.11.0 ships AWS SDK for Java 2.x at **2.44.4**. Pin `aws.sdk.version` in the parent `pom.xml` to the same version. A lower pin causes `NoSuchMethodError: RefreshRetryTokenRequest$Builder.isLongPolling(boolean)` at startup, because the Glue client resolves against an older shaded `retries` module.
 
 ---
 
