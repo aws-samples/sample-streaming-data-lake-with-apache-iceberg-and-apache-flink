@@ -92,7 +92,7 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     const config = APP_CONFIG[appType];
     const databaseName = `iceberg_${appType.replace(/-/g, '_')}`;
-    const cdkBootstrapQualifier = this.node.tryGetContext('cdkBootstrapQualifier') || 'hnb659fds';
+    const cdkBootstrapQualifier = this.node.tryGetContext('@aws-cdk/core:bootstrapQualifier') || this.node.tryGetContext('cdkBootstrapQualifier') || 'hnb659fds';
 
     // --- Kinesis Streams ---
     const streams = new KinesisStreams(this, 'Streams', {
@@ -164,26 +164,10 @@ export class IcebergFlinkStack extends cdk.Stack {
       schemaRegistryName: schemaRegistry?.name,
     });
 
-    // --- Flink JAR Asset ---
+    // --- Flink JAR Asset (pre-built locally with mvn package) ---
+    const jarPath = require('path').resolve(__dirname, '..', config.modulePath, 'target', config.jarName);
     const flinkJarAsset = new s3assets.Asset(this, 'FlinkJarAsset', {
-      path: '..',
-      exclude: ['cdk-infrastructure', 'cdk.out', '.git', '.idea', '.kiro', 'target', 'node_modules'],
-      bundling: {
-        image: cdk.DockerImage.fromRegistry('maven:3.9-eclipse-temurin-17'),
-        command: [
-          'bash', '-c',
-          [
-            'mkdir -p /tmp/.m2',
-            'cp -r /asset-input/* /tmp/',
-            'cd /tmp',
-            `mvn clean package -DskipTests -pl ${config.modulePath.replace('../', '')} -am -Dmaven.repo.local=/tmp/.m2 -q`,
-            'mkdir -p /asset-output',
-            `cp /tmp/${config.modulePath.replace('../', '')}/target/${config.jarName} /asset-output/app.jar`,
-          ].join(' && '),
-        ],
-        user: 'root',
-        outputType: cdk.BundlingOutput.SINGLE_FILE,
-      },
+      path: jarPath,
     });
 
     // --- Runtime Properties ---
