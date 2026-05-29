@@ -82,7 +82,7 @@ public final class DataStreamIcebergJob {
     private static final String TABLE_FORMAT_VERSION = "table.format.version";
 
     // Write-side tuning defaults.
-    private static final String DEFAULT_TABLE_FORMAT_VERSION = "2";
+    private static final String DEFAULT_TABLE_FORMAT_VERSION = "3";
     private static final String DEFAULT_WRITE_MODE = "upsert";
     private static final String DEFAULT_PK_COLUMNS = "event_id,event_date,region";
     private static final String DEFAULT_DATABASE = "iceberg_samples";
@@ -306,6 +306,7 @@ public final class DataStreamIcebergJob {
                 .tableLoader(tableLoader)
                 .set("write.format.default", "parquet")
                 .set("write.target-file-size-bytes", Long.toString(DEFAULT_TARGET_FILE_SIZE))
+                .uidSuffix("orders-datastream")
                 .setSnapshotProperty("flink.job-id", "datastream-iceberg-job");
 
         if (isUpsert) {

@@ -62,9 +62,9 @@ public final class DynamicSinkJob {
     private static final String DEFAULT_CACHE_MAX_SIZE = "100";
     private static final String DEFAULT_CACHE_REFRESH_MS = "60000";
     private static final String TARGET_FILE_SIZE_BYTES = "134217728";
-    // Flink 1.10's Iceberg sink emits v2-style equality + positional delete files.
-    // See BLOG_POST.md for the full discussion of why v3 is not yet useful here.
-    private static final String FORMAT_VERSION = "2";
+    // Iceberg 1.11.0+: V3 tables get equality deletes + Delete Vectors (DVs) for streaming
+    // upserts. DVs replace positional delete files for known-position deletes.
+    private static final String FORMAT_VERSION = "3";
     private static final int LOCAL_WEB_UI_PORT = 8082;
 
     private static final String UID_KINESIS_SOURCE = "kinesis-source-dynamic";

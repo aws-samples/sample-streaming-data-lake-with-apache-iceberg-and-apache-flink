@@ -31,8 +31,8 @@
         <maven.compiler.target>17</maven.compiler.target>
         <flink.version>2.2.0</flink.version>
         <flink.connector.suffix>2.0</flink.connector.suffix>
-        <iceberg.version>1.10.1</iceberg.version>
-        <iceberg.flink.suffix>2.0</iceberg.flink.suffix>
+        <iceberg.version>1.11.0</iceberg.version>
+        <iceberg.flink.suffix>2.1</iceberg.flink.suffix>
         <scala.binary.version>2.12</scala.binary.version>
         <aws.sdk.version>2.33.0</aws.sdk.version>
         <hadoop.version>3.4.0</hadoop.version>

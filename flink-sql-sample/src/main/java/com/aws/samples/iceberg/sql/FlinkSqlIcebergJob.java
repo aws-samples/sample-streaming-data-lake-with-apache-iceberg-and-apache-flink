@@ -16,7 +16,7 @@ import java.util.Properties;
  *
  * <p>Features: creating an Iceberg catalog via SQL DDL, reading Kinesis via SQL,
  * writing to Iceberg v2 tables, optional UPSERT with PK enforcement, SQL hints for
- * embedded compaction (informational only in this sample).
+ * embedded maintenance via flink-maintenance.* options (compaction, snapshot expiration, orphan cleanup).
  *
  * <p>Configuration keys (via {@code FlinkApplicationProperties}):
  * <ul>
@@ -29,7 +29,7 @@ import java.util.Properties;
  *   <li>{@code iceberg.catalog.type} — {@code glue} (default) or {@code s3tables}
  *   <li>{@code write.mode} — {@code append} (default) or {@code upsert}
  *   <li>{@code primary.key.columns} — CSV list (default: {@code event_id,event_date,region})
- *   <li>{@code enable.maintenance} — informational; DataStream API is preferred for maintenance
+ *   <li>{@code enable.maintenance} — enables SQL-embedded compaction, snapshot expiration, and orphan cleanup via Coordinator Lock
  * </ul>
  */
 public class FlinkSqlIcebergJob {
@@ -75,10 +75,6 @@ public class FlinkSqlIcebergJob {
             enableMaintenance = false;
         }
         
-        if (enableMaintenance) {
-            LOG.warn("Note: SQL API has limited maintenance support compared to DataStream API");
-            LOG.warn("For full maintenance capabilities, use DataStreamIcebergJob with ENABLE_MAINTENANCE=true");
-        }
         
         // Configure checkpointing for local development only.
         // AWS Managed Flink configures checkpointing for us on the service side.
@@ -103,6 +99,23 @@ public class FlinkSqlIcebergJob {
         }
         
         LOG.info("Table environment created");
+
+        // SQL-embedded maintenance (Iceberg 1.11.0+): compaction, expire, orphan cleanup
+        // Uses Coordinator Lock (jvm) — no external RDS/ZK needed for single-job maintenance.
+        if (enableMaintenance && !"s3tables".equalsIgnoreCase(catalogType)) {
+            LOG.info("Enabling SQL-embedded maintenance (Iceberg 1.11.0+)");
+            tableEnv.getConfig().set("table.exec.iceberg.use-v2-sink", "true");
+            tableEnv.getConfig().set("flink-maintenance.rewrite.enabled", "true");
+            tableEnv.getConfig().set("flink-maintenance.expire-snapshots.enabled", "true");
+            tableEnv.getConfig().set("flink-maintenance.delete-orphan-files.enabled", "true");
+            tableEnv.getConfig().set("flink-maintenance.lock.type", "jvm");
+            tableEnv.getConfig().set("flink-maintenance.rewrite.schedule.commit-count", "20");
+            tableEnv.getConfig().set("flink-maintenance.expire-snapshots.schedule.commit-count", "50");
+            tableEnv.getConfig().set("flink-maintenance.expire-snapshots.retain-last", "5");
+            tableEnv.getConfig().set("flink-maintenance.expire-snapshots.max-snapshot-age-seconds",
+                    Long.toString(24 * 60 * 60));
+            LOG.info("Maintenance configured: rewrite (every 20 commits), expire (every 50), orphan cleanup");
+        }
         
         // Create Iceberg catalog using SQL DDL - supports Glue Catalog or S3 Tables
         String catalogName;
@@ -309,7 +322,7 @@ public class FlinkSqlIcebergJob {
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
-            "    'format-version' = '2',\n" +
+            "    'format-version' = '3',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
             upsertProperties +
@@ -351,7 +364,7 @@ public class FlinkSqlIcebergJob {
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
-            "    'format-version' = '2',\n" +
+            "    'format-version' = '3',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
             upsertProperties +
@@ -393,7 +406,7 @@ public class FlinkSqlIcebergJob {
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
-            "    'format-version' = '2',\n" +
+            "    'format-version' = '3',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
             upsertProperties +
