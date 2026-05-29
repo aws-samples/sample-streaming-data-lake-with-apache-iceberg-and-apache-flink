@@ -1,6 +1,6 @@
 # DataStream API Iceberg Sample
 
-This module demonstrates using Apache Flink's DataStream API with Apache Iceberg 1.10 and the new IcebergSink (SinkV2).
+This module demonstrates using Apache Flink's DataStream API with Apache Iceberg 1.11.0 and the new IcebergSink (SinkV2).
 ## Features
 
 - **IcebergSink (SinkV2)**: Uses the new Flink Sink interface for improved streaming writes
@@ -12,7 +12,7 @@ This module demonstrates using Apache Flink's DataStream API with Apache Iceberg
 ## Requirements
 
 - Apache Flink 2.2.0
-- Apache Iceberg 1.10.1
+- Apache Iceberg 1.11.0
 - AWS Kinesis Data Streams
 - AWS Glue Data Catalog
 - Amazon S3
@@ -172,7 +172,7 @@ The job supports two write modes, configurable via `WRITE_MODE`:
 
 When `WRITE_MODE=upsert`:
 - Deduplicates records based on `PRIMARY_KEY_COLUMNS`
-- Uses merge-on-read with delete vectors (v2 format)
+- Uses merge-on-read with delete vectors (v3 format)
 - Partition columns must be included in primary key when using HASH distribution
 - Best for: Event sourcing, CDC, or when duplicate events may arrive
 

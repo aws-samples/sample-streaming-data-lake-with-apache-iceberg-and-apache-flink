@@ -9,14 +9,14 @@ Stores order events with the following key features:
 - **Primary Key**: `event_id` for UPSERT operations
 - **Partitioning**: By `event_date` and `region` for efficient querying
 - **Sort Order**: By `event_time` and `event_id` for better read performance
-- **Format**: Iceberg v2 with merge-on-read delete mode
+- **Format**: Iceberg v3 with merge-on-read delete mode
 
 ### Users Table (`create_users_table.sql`)
 Stores user activity events with the following key features:
 - **Primary Key**: `event_id` for UPSERT operations
 - **Partitioning**: By `event_date` and `region` for efficient querying
 - **Sort Order**: By `event_time` and `user_id` for better read performance
-- **Format**: Iceberg v2 with merge-on-read delete mode
+- **Format**: Iceberg v3 with merge-on-read delete mode
 - **Schema Evolution**: Includes optional `user_agent` field
 
 ### Clicks Table (`create_clicks_table.sql`)
@@ -24,13 +24,13 @@ Stores click stream events with the following key features:
 - **Primary Key**: `event_id` for UPSERT operations
 - **Partitioning**: By `event_date` and `region` for efficient querying
 - **Sort Order**: By `event_time` and `session_id` for better read performance
-- **Format**: Iceberg v2 with merge-on-read delete mode
+- **Format**: Iceberg v3 with merge-on-read delete mode
 
 ## Table Configuration
 
 All tables are configured with:
 
-- **Format Version**: 2 (supports delete vectors and merge-on-read)
+- **Format Version**: 3 (supports deletion vectors and merge-on-read)
 - **File Format**: Parquet with Snappy compression
 - **Target File Size**: 128 MB (134217728 bytes)
 - **Delete Mode**: merge-on-read (uses delete vectors for efficient updates)

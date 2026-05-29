@@ -1,6 +1,6 @@
 # Streaming to Apache Iceberg with Apache Flink on AWS
 
-Production-ready samples that showcase Apache Iceberg 1.10 on Apache Flink 2.2 running on AWS Managed Service for Apache Flink. The samples cover seven patterns — DataStream and SQL sinks, a dynamic sink driven by JSON inference, a dynamic sink driven by AWS Glue Schema Registry (Avro), and three variants for reading Iceberg tables (DataStream, SQL, and hybrid batch-then-stream).
+Production-ready samples that showcase Apache Iceberg 1.11.0 on Apache Flink 2.2 running on AWS Managed Service for Apache Flink. The samples cover seven patterns — DataStream and SQL sinks, a dynamic sink driven by JSON inference, a dynamic sink driven by AWS Glue Schema Registry (Avro), and three variants for reading Iceberg tables (DataStream, SQL, and hybrid batch-then-stream).
 
 Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is deployable via a single parameterized CDK stack, and shares a small `runtime` toolbox that keeps each job's `main()` focused on its own pipeline.
 
@@ -90,7 +90,7 @@ streaming-data-lake-with-apache-iceberg-and-apache-flink/
 │       └── constructs/                         # KinesisStreams, CatalogResources, MaintenanceResources, FlinkIam
 ├── docker-compose.yml                          # Local Postgres for JDBC lock testing
 ├── .run/                                       # IntelliJ run configurations
-└── pom.xml                                     # Parent POM (Flink 2.2, Iceberg 1.10)
+└── pom.xml                                     # Parent POM (Flink 2.2, Iceberg 1.11.0)
 ```
 
 Every sample `main()` follows the same shape:

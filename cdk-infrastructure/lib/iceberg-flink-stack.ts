@@ -9,7 +9,7 @@ import { MaintenanceResources } from './constructs/maintenance-resources';
 import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
-  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid';
+  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid' | 'variant';
   nameSuffix?: string;
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';
@@ -78,6 +78,14 @@ const APP_CONFIG = {
     description: 'Bootstrap from Iceberg then switch to Kinesis streaming',
     needsSourceStream: true,
     needsSinkStream: true,
+  },
+  variant: {
+    modulePath: '../variant-sample',
+    jarName: 'variant-sample-1.0-SNAPSHOT.jar',
+    mainClass: 'com.aws.samples.iceberg.variant.VariantSinkJob',
+    description: 'Stream JSON into an Iceberg V3 variant column via the Flink Variant type',
+    needsSourceStream: true,
+    needsSinkStream: false,
   },
 };
 
@@ -436,6 +444,13 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.region': resources.region,
         'schema.registry.name': `iceberg-${appType}`,
         'partition.candidates': 'event_date,region',
+      };
+    } else if (appType === 'variant') {
+      return {
+        ...baseProps,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.region': resources.region,
+        'iceberg.table': 'events_variant',
       };
     } else {
       // dynamic

@@ -23,6 +23,7 @@
         <module>iceberg-source-datastream-sample</module>
         <module>iceberg-source-sql-sample</module>
         <module>hybrid-source-sample</module>
+        <module>variant-sample</module>
     </modules>
 
     <properties>

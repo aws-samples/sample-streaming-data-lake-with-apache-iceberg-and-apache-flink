@@ -6,7 +6,7 @@ This module demonstrates Apache Iceberg integration with Apache Flink SQL, showc
 
 - **Flink SQL API**: Uses Flink Table API and SQL for declarative data processing
 - **Kinesis Source**: Reads streaming events from Amazon Kinesis Data Streams
-- **Iceberg v2 Format**: Uses Iceberg table format v2 with delete vectors
+- **Iceberg v3 Format**: Uses Iceberg table format v3 with delete vectors
 - **UPSERT Operations**: Demonstrates row-level updates using primary keys
 - **Partitioning**: Tables partitioned by `event_date` and `region`
 - **SQL Hints**: Uses SQL hints for write optimization
