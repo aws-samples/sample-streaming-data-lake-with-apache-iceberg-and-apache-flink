@@ -218,10 +218,12 @@ public class SchemaAgnosticRoutingGenerator implements DynamicRecordGenerator<Js
             if (isDate(text)) return "date";
             return "string";
         }
-        if (value.isInt()) return "int";
-        if (value.isLong()) return "long";
-        if (value.isDouble() || value.isFloat()) return "double";
-        if (value.isBigDecimal()) return "decimal";
+        // Widen all integral numbers to long and all fractional to double so the same
+        // logical field never produces divergent signatures (e.g. 100 vs 2147483648, or
+        // 10 vs 10.0), which would create duplicate schemas and Iceberg reconcile errors.
+        if (value.isNumber()) {
+            return (value.isFloatingPointNumber() || value.isBigDecimal()) ? "double" : "long";
+        }
         if (value.isBoolean()) return "boolean";
         if (value.isArray()) return "array";
         if (value.isObject()) return "struct";
@@ -322,20 +324,12 @@ public class SchemaAgnosticRoutingGenerator implements DynamicRecordGenerator<Js
             return Types.StringType.get();
         }
         
-        if (value.isInt()) {
-            return Types.IntegerType.get();
-        }
-        
-        if (value.isLong()) {
+        if (value.isNumber()) {
+            // Widen integral->long, fractional->double (mirrors getTypeCode) so schemas stay stable.
+            if (value.isFloatingPointNumber() || value.isBigDecimal()) {
+                return Types.DoubleType.get();
+            }
             return Types.LongType.get();
-        }
-        
-        if (value.isDouble() || value.isFloat()) {
-            return Types.DoubleType.get();
-        }
-        
-        if (value.isBigDecimal()) {
-            return Types.DecimalType.of(38, 10);
         }
         
         if (value.isBoolean()) {

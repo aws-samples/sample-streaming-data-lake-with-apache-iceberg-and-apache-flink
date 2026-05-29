@@ -391,10 +391,16 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'glue.database': `iceberg_${appType.replace(/-/g, '_')}`,
-        'table.prefix': 'sql_',
+        // Maintenance writes V2-sink tables under a separate prefix; faster checkpoints
+        // make the commit-count rewrite trigger fire sooner for validation.
+        'table.prefix': enableMaintenance ? 'sqlm_' : 'sql_',
+        'enable.maintenance': enableMaintenance.toString(),
         'write.mode': 'append',
         'primary.key.columns': 'event_id,event_date,region',
       };
+      if (enableMaintenance) {
+        sqlProps['checkpoint.interval.ms'] = '20000';
+      }
       if (catalogType === 'glue' && resources.warehousePath) {
         sqlProps['s3.warehouse.path'] = resources.warehousePath;
       }

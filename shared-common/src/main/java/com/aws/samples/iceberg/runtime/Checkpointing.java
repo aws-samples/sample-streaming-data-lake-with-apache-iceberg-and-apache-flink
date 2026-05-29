@@ -1,10 +1,14 @@
 package com.aws.samples.iceberg.runtime;
 
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.core.execution.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
 
 /**
  * Shared checkpointing defaults for the samples. Only invoked when running locally —
@@ -32,6 +36,15 @@ public final class Checkpointing {
         cp.setCheckpointTimeout(CHECKPOINT_TIMEOUT_MS);
         cp.setMaxConcurrentCheckpoints(MAX_CONCURRENT_CHECKPOINTS);
         cp.setTolerableCheckpointFailureNumber(TOLERABLE_FAILURES);
+
+        // A transient task/checkpoint failure should retry, not kill the job. (Managed Flink
+        // provides its own restart strategy; this only applies to local runs.)
+        Configuration restart = new Configuration();
+        restart.set(RestartStrategyOptions.RESTART_STRATEGY, "fixed-delay");
+        restart.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_ATTEMPTS, 3);
+        restart.set(RestartStrategyOptions.RESTART_STRATEGY_FIXED_DELAY_DELAY, Duration.ofSeconds(10));
+        env.configure(restart);
+
         LOG.info("Local checkpointing configured: interval={}ms, mode=EXACTLY_ONCE", intervalMs);
     }
 }

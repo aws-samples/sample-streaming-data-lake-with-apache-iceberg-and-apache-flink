@@ -73,7 +73,11 @@ public class HybridSourceJob {
             Checkpointing.configureLocalDefaults(env, interval);
         }
 
-        env.disableOperatorChaining();
+        // Operator chaining is on by default. Disabling it increases network shuffles and
+        // thread count; only do so when explicitly debugging the job graph.
+        if (Boolean.parseBoolean(flinkProps.getProperty("debug.disable-operator-chaining", "false"))) {
+            env.disableOperatorChaining();
+        }
         buildPipeline(env, flinkProps);
 
         env.execute("HybridSource: Iceberg Bootstrap -> Kinesis Streaming");

@@ -5,12 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.data.GenericMapData;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.flink.FlinkSchemaUtil;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.slf4j.Logger;
@@ -168,6 +170,8 @@ public class JsonToRowDataDeserializer implements DeserializationSchema<RowData>
     
     @Override
     public TypeInformation<RowData> getProducedType() {
-        return TypeInformation.of(RowData.class);
+        // Derive the RowData type from the Iceberg schema so Flink uses its efficient internal
+        // serializer instead of falling back to Kryo (which is slow and breaks disableGenericTypes).
+        return InternalTypeInfo.of(FlinkSchemaUtil.convert(schema));
     }
 }

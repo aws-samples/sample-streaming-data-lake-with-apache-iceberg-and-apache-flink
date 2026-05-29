@@ -172,6 +172,6 @@ public final class DynamicSinkJob {
                     .set("write.merge.mode", "merge-on-read");
         }
 
-        sinkBuilder.append();
+        sinkBuilder.uidPrefix("dynamic-iceberg-sink").append();
     }
 }
