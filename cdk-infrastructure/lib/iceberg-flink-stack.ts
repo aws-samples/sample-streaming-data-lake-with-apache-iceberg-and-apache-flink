@@ -10,6 +10,7 @@ import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
   appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid';
+  nameSuffix?: string;
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';
   // Source-app overrides: when set, source apps (iceberg-source, iceberg-source-sql,
@@ -85,6 +86,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     super(scope, id, props);
 
     const { appType, enableMaintenance, catalogType = 'glue' } = props;
+    const nameSuffix = props.nameSuffix ? `-${props.nameSuffix}` : '';
 
     if (catalogType === 's3tables' && enableMaintenance) {
       throw new Error('S3 Tables handles maintenance automatically. Do not enable maintenance when using S3 Tables catalog.');
@@ -97,6 +99,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     // --- Kinesis Streams ---
     const streams = new KinesisStreams(this, 'Streams', {
       appType,
+      nameSuffix,
       needsSourceStream: config.needsSourceStream,
       needsSinkStream: config.needsSinkStream,
     });
@@ -132,7 +135,7 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     // --- CloudWatch Logs ---
     const logGroup = new logs.LogGroup(this, 'FlinkLogGroup', {
-      logGroupName: `/aws/kinesisanalytics/iceberg-flink-${appType}`,
+      logGroupName: `/aws/kinesisanalytics/iceberg-flink-${appType}${nameSuffix}`,
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -188,7 +191,7 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     // --- Flink Application ---
     const flinkApp = new kinesisanalytics.CfnApplication(this, 'FlinkApplication', {
-      applicationName: `iceberg-flink-${appType}${enableMaintenance ? '-maintenance' : ''}`,
+      applicationName: `iceberg-flink-${appType}${nameSuffix}${enableMaintenance ? '-maintenance' : ''}`,
       runtimeEnvironment: 'FLINK-2_2',
       serviceExecutionRole: flinkIam.role.roleArn,
       applicationConfiguration: {

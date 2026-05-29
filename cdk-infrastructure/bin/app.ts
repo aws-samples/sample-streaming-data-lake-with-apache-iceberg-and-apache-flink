@@ -26,6 +26,7 @@ const stackSuffix = app.node.tryGetContext('stackSuffix') || '';
 
 const stack = new IcebergFlinkStack(app, `IcebergFlinkStack${stackSuffix ? '-' + stackSuffix : ''}`, {
   appType: appType as 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid',
+  nameSuffix: stackSuffix,
   enableMaintenance: enableMaintenance,
   catalogType: catalogType as 'glue' | 's3tables',
   sourceDatabase,

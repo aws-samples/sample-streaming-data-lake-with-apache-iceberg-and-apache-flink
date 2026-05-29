@@ -475,7 +475,7 @@
                                         <pattern>org.apache.flink.runtime.util.HadoopUtils</pattern>
                                         <shadedPattern>shaded.org.apache.flink.runtime.util.HadoopUtils</shadedPattern>
                                     </relocation>
-    <relocation>
+                                    <relocation>
                                         <pattern>software.amazon.awssdk</pattern>
                                         <shadedPattern>shaded.software.amazon.awssdk</shadedPattern>
                                     </relocation>
