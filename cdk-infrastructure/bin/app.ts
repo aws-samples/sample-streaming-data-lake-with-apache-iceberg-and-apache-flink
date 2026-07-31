@@ -67,6 +67,10 @@ if (enableNag) {
       reason: 'RDS multi-AZ is not required for sample applications - enable in production',
     },
     {
+      id: 'AwsSolutions-SMG4',
+      reason: 'The maintenance-lock DB credential is demo-scoped; rotation requires a rotation Lambda that adds cost/complexity to the sample - enable in production',
+    },
+    {
       id: 'AwsSolutions-RDS10',
       reason: 'RDS deletion protection is disabled for easy cleanup of sample resources',
     },

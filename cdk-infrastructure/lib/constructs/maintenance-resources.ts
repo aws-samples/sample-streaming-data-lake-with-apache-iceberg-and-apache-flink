@@ -61,6 +61,7 @@ export class MaintenanceResources extends Construct {
       credentials: rds.Credentials.fromSecret(this.dbSecret),
       allocatedStorage: 20,
       maxAllocatedStorage: 100,
+      storageEncrypted: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       deletionProtection: false,
       backupRetention: cdk.Duration.days(7),
