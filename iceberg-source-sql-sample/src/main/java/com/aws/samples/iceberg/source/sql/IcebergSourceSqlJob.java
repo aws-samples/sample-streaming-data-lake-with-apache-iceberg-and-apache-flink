@@ -1,6 +1,8 @@
 package com.aws.samples.iceberg.source.sql;
 
 import com.aws.samples.iceberg.runtime.AppProperties;
+import com.aws.samples.iceberg.runtime.Checkpointing;
+import com.aws.samples.iceberg.runtime.FlinkEnvironments;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -151,14 +153,16 @@ public class IcebergSourceSqlJob {
         
         // Add SQL hints for streaming configuration
         if (streaming) {
-            String monitorInterval = props.getProperty("iceberg.source.monitor-interval", "60s");
+            String monitorInterval = safeHint("monitor-interval",
+                    props.getProperty("iceberg.source.monitor-interval", "60s"), "\\d+[smh]?");
             
             query.append(" /*+ OPTIONS(");
             query.append("'streaming' = 'true', ");
             query.append("'monitor-interval' = '").append(monitorInterval).append("'");
             
             // Add starting snapshot id if specified
-            String startSnapshotId = props.getProperty("iceberg.source.start-snapshot-id");
+            String startSnapshotId = safeHint("start-snapshot-id",
+                    props.getProperty("iceberg.source.start-snapshot-id"), "\\d+");
             if (startSnapshotId != null && !startSnapshotId.isEmpty()) {
                 query.append(", 'start-snapshot-id' = '").append(startSnapshotId).append("'");
             }
@@ -166,10 +170,14 @@ public class IcebergSourceSqlJob {
             query.append(") */");
         } else {
             // Batch mode - optional time travel
-            String snapshotId = props.getProperty("iceberg.source.snapshot-id");
-            String asOfTimestamp = props.getProperty("iceberg.source.as-of-timestamp");
-            String branch = props.getProperty("iceberg.source.branch");
-            String tag = props.getProperty("iceberg.source.tag");
+            String snapshotId = safeHint("snapshot-id",
+                    props.getProperty("iceberg.source.snapshot-id"), "\\d+");
+            String asOfTimestamp = safeHint("as-of-timestamp",
+                    props.getProperty("iceberg.source.as-of-timestamp"), "\\d+");
+            String branch = safeHint("branch",
+                    props.getProperty("iceberg.source.branch"), "[A-Za-z0-9_./\\-]+");
+            String tag = safeHint("tag",
+                    props.getProperty("iceberg.source.tag"), "[A-Za-z0-9_./\\-]+");
             
             StringBuilder hints = new StringBuilder();
             boolean hasHints = false;
@@ -256,11 +264,15 @@ public class IcebergSourceSqlJob {
         // For local dev, pass -Drest.port=8085 as a JVM argument if needed.
         
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
-        
-        // Configure checkpointing
-        long checkpointInterval = Long.parseLong(props.getProperty("checkpoint.interval.ms", "60000"));
-        env.enableCheckpointing(checkpointInterval);
-        
+
+        // On Managed Flink the service configures checkpointing; calling enableCheckpointing here
+        // can cause MutatedConfigurationException. Only configure it for local runs.
+        if (FlinkEnvironments.isLocal(env)) {
+            long interval = Long.parseLong(props.getProperty(
+                    "checkpoint.interval.ms", Long.toString(Checkpointing.DEFAULT_INTERVAL_MS)));
+            Checkpointing.configureLocalDefaults(env, interval);
+        }
+
         return env;
     }
     
@@ -291,5 +303,16 @@ public class IcebergSourceSqlJob {
         if (value == null || value.isEmpty()) {
             throw new IllegalArgumentException(message);
         }
+    }
+
+    /**
+     * Validate a value that will be interpolated into a SQL hint. Rejects anything that
+     * could break out of the quoted option literal (injection guard).
+     */
+    private static String safeHint(String key, String value, String allowedRegex) {
+        if (value != null && !value.isEmpty() && !value.matches(allowedRegex)) {
+            throw new IllegalArgumentException("Unsafe value for " + key + ": " + value);
+        }
+        return value;
     }
 }

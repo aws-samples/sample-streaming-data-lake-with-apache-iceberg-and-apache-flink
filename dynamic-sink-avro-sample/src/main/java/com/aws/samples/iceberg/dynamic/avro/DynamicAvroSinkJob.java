@@ -54,9 +54,9 @@ public final class DynamicAvroSinkJob {
     private static final String DEFAULT_PARTITION_CANDIDATES = "event_date,region,date";
     private static final String DEFAULT_CACHE_MAX_SIZE = "100";
     private static final String DEFAULT_CACHE_REFRESH_MS = "60000";
-    // v2 is the right choice for Flink writers in Iceberg 1.10 — the sink emits
-    // equality + positional delete files, not DVs.
-    private static final String FORMAT_VERSION = "2";
+    // Iceberg 1.11.0+: V3 tables get equality deletes + Delete Vectors (DVs).
+    // DVs replace positional delete files for known-position deletes.
+    private static final String FORMAT_VERSION = "3";
     private static final String TARGET_FILE_SIZE_BYTES = "134217728";
     private static final int LOCAL_WEB_UI_PORT = 8083;
 

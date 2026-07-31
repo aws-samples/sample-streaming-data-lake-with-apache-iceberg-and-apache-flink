@@ -16,7 +16,7 @@ import java.util.Properties;
  *
  * <p>Features: creating an Iceberg catalog via SQL DDL, reading Kinesis via SQL,
  * writing to Iceberg v2 tables, optional UPSERT with PK enforcement, SQL hints for
- * embedded compaction (informational only in this sample).
+ * embedded maintenance via flink-maintenance.* options (compaction, snapshot expiration, orphan cleanup).
  *
  * <p>Configuration keys (via {@code FlinkApplicationProperties}):
  * <ul>
@@ -29,7 +29,7 @@ import java.util.Properties;
  *   <li>{@code iceberg.catalog.type} — {@code glue} (default) or {@code s3tables}
  *   <li>{@code write.mode} — {@code append} (default) or {@code upsert}
  *   <li>{@code primary.key.columns} — CSV list (default: {@code event_id,event_date,region})
- *   <li>{@code enable.maintenance} — informational; DataStream API is preferred for maintenance
+ *   <li>{@code enable.maintenance} — enables SQL-embedded compaction, snapshot expiration, and orphan cleanup via Coordinator Lock
  * </ul>
  */
 public class FlinkSqlIcebergJob {
@@ -75,10 +75,6 @@ public class FlinkSqlIcebergJob {
             enableMaintenance = false;
         }
         
-        if (enableMaintenance) {
-            LOG.warn("Note: SQL API has limited maintenance support compared to DataStream API");
-            LOG.warn("For full maintenance capabilities, use DataStreamIcebergJob with ENABLE_MAINTENANCE=true");
-        }
         
         // Configure checkpointing for local development only.
         // AWS Managed Flink configures checkpointing for us on the service side.
@@ -103,6 +99,25 @@ public class FlinkSqlIcebergJob {
         }
         
         LOG.info("Table environment created");
+
+        // SQL-embedded maintenance (Iceberg 1.11.0+): compaction, expire, orphan cleanup.
+        // MSF NOTE: flink-maintenance.* must be set as TABLE PROPERTIES (read by IcebergSink ->
+        // FlinkMaintenanceConfig.writeProperties), NOT via tableEnv config — MSF rejects those
+        // config mutations (MutatedConfigurationException). use-v2-sink (a table.exec option MSF
+        // allows) is required so the SinkV2 IcebergSink, which runs maintenance, is used.
+        String maintenanceProps = "";
+        if (enableMaintenance && !"s3tables".equalsIgnoreCase(catalogType)) {
+            LOG.info("Enabling SQL maintenance via table properties (Coordinator Lock, no JDBC)");
+            tableEnv.getConfig().set("table.exec.iceberg.use-v2-sink", "true");
+            maintenanceProps =
+                "    'flink-maintenance.rewrite.enabled' = 'true',\n" +
+                "    'flink-maintenance.expire-snapshots.enabled' = 'true',\n" +
+                "    'flink-maintenance.delete-orphan-files.enabled' = 'true',\n" +
+                "    'flink-maintenance.lock.type' = '',\n" +
+                "    'flink-maintenance.rewrite.schedule.commit-count' = '10',\n" +
+                "    'flink-maintenance.expire-snapshots.schedule.commit-count' = '50',\n" +
+                "    'flink-maintenance.expire-snapshots.retain-last' = '5',\n";
+        }
         
         // Create Iceberg catalog using SQL DDL - supports Glue Catalog or S3 Tables
         String catalogName;
@@ -193,9 +208,9 @@ public class FlinkSqlIcebergJob {
         LOG.info("Using database: {}", glueDatabase);
         
         // Create Iceberg tables for each event type with v2 format and delete vectors
-        createOrderEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode);
-        createUserEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode);
-        createClickEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode);
+        createOrderEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode, maintenanceProps);
+        createUserEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode, maintenanceProps);
+        createClickEventsTable(tableEnv, glueDatabase, tablePrefix, isUpsertMode, maintenanceProps);
         
         // Start streaming writes from Kinesis to Iceberg tables using StatementSet
         // This ensures we read from Kinesis only once and route to 3 tables
@@ -284,7 +299,7 @@ public class FlinkSqlIcebergJob {
      * Partitioned by event_date and region for efficient querying.
      * When upsert mode is enabled, adds PRIMARY KEY constraint for deduplication.
      */
-    private static void createOrderEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
+    private static void createOrderEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode, String maintenanceProps) {
         String primaryKeyClause = isUpsertMode ? 
             ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
@@ -309,10 +324,11 @@ public class FlinkSqlIcebergJob {
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
-            "    'format-version' = '2',\n" +
+            "    'format-version' = '3',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
             upsertProperties +
+            maintenanceProps +
             "    'write.target-file-size-bytes' = '134217728'\n" +
             ")";
         
@@ -326,7 +342,7 @@ public class FlinkSqlIcebergJob {
      * Partitioned by event_date and region for efficient querying.
      * When upsert mode is enabled, adds PRIMARY KEY constraint for deduplication.
      */
-    private static void createUserEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
+    private static void createUserEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode, String maintenanceProps) {
         String primaryKeyClause = isUpsertMode ? 
             ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
@@ -351,10 +367,11 @@ public class FlinkSqlIcebergJob {
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
-            "    'format-version' = '2',\n" +
+            "    'format-version' = '3',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
             upsertProperties +
+            maintenanceProps +
             "    'write.target-file-size-bytes' = '134217728'\n" +
             ")";
         
@@ -368,7 +385,7 @@ public class FlinkSqlIcebergJob {
      * Partitioned by event_date and region for efficient querying.
      * When upsert mode is enabled, adds PRIMARY KEY constraint for deduplication.
      */
-    private static void createClickEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode) {
+    private static void createClickEventsTable(StreamTableEnvironment tableEnv, String database, String tablePrefix, boolean isUpsertMode, String maintenanceProps) {
         String primaryKeyClause = isUpsertMode ? 
             ",\n    PRIMARY KEY (event_id, event_date, region) NOT ENFORCED\n" : "\n";
         
@@ -393,10 +410,11 @@ public class FlinkSqlIcebergJob {
             primaryKeyClause +
             ") PARTITIONED BY (event_date, region)\n" +
             "WITH (\n" +
-            "    'format-version' = '2',\n" +
+            "    'format-version' = '3',\n" +
             "    'write.format.default' = 'parquet',\n" +
             "    'write.parquet.compression-codec' = 'snappy',\n" +
             upsertProperties +
+            maintenanceProps +
             "    'write.target-file-size-bytes' = '134217728'\n" +
             ")";
         

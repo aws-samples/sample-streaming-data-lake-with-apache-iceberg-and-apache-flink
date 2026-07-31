@@ -102,38 +102,44 @@ public class AvroToDynamicRecordGenerator
         if (bytes == null || bytes.length == 0) return;
         ensureInitialized();
 
-        // Resolve schema (cached inside the facade and in our writerSchemaCache)
-        com.amazonaws.services.schemaregistry.common.Schema gsrSchema = facade.getSchema(bytes);
-        String schemaName = gsrSchema.getSchemaName();
+        try {
+            // Resolve schema (cached inside the facade and in our writerSchemaCache)
+            com.amazonaws.services.schemaregistry.common.Schema gsrSchema = facade.getSchema(bytes);
+            String schemaName = gsrSchema.getSchemaName();
 
-        org.apache.avro.Schema writerSchema = writerSchemaCache.computeIfAbsent(
-                gsrSchema.getSchemaDefinition(),
-                def -> new org.apache.avro.Schema.Parser().parse(def));
+            org.apache.avro.Schema writerSchema = writerSchemaCache.computeIfAbsent(
+                    gsrSchema.getSchemaDefinition(),
+                    def -> new org.apache.avro.Schema.Parser().parse(def));
 
-        Schema icebergSchema = icebergSchemaCache.computeIfAbsent(
-                writerSchema, this::convertAvroSchema);
+            Schema icebergSchema = icebergSchemaCache.computeIfAbsent(
+                    writerSchema, this::convertAvroSchema);
 
-        TableIdentifier tableId = tableIdCache.computeIfAbsent(
-                schemaName, n -> TableIdentifier.of(database, normalizeTableName(n)));
-        String writeBranch = (branch == null || branch.isEmpty()) ? "main" : branch;
+            TableIdentifier tableId = tableIdCache.computeIfAbsent(
+                    schemaName, n -> TableIdentifier.of(database, normalizeTableName(n)));
+            String writeBranch = (branch == null || branch.isEmpty()) ? "main" : branch;
 
-        // Decode the Avro payload
-        byte[] avroPayload = facade.getActualData(bytes);
-        GenericDatumReader<GenericRecord> reader = new GenericDatumReader<>(writerSchema);
-        BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(avroPayload, null);
-        GenericRecord record = reader.read(null, decoder);
+            // Decode the Avro payload
+            byte[] avroPayload = facade.getActualData(bytes);
+            GenericDatumReader<GenericRecord> reader = new GenericDatumReader<>(writerSchema);
+            BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(avroPayload, null);
+            GenericRecord record = reader.read(null, decoder);
 
-        RowData rowData = convertToRowData(record, icebergSchema);
-        PartitionSpec spec = buildPartitionSpec(icebergSchema);
+            RowData rowData = convertToRowData(record, icebergSchema);
+            PartitionSpec spec = buildPartitionSpec(icebergSchema);
 
-        out.collect(new DynamicRecord(
-                tableId,
-                writeBranch,
-                icebergSchema,
-                rowData,
-                spec,
-                DistributionMode.HASH,
-                2));
+            out.collect(new DynamicRecord(
+                    tableId,
+                    writeBranch,
+                    icebergSchema,
+                    rowData,
+                    spec,
+                    DistributionMode.HASH,
+                    2));
+        } catch (Exception e) {
+            // Skip poison records (corrupt payload, unknown schema UUID, decode failure) instead
+            // of failing the operator, which would crash-loop the job on a single bad record.
+            LOG.warn("Skipping unparseable record ({} bytes): {}", bytes.length, e.toString());
+        }
     }
 
     private Schema convertAvroSchema(org.apache.avro.Schema avroSchema) {
@@ -174,18 +180,33 @@ public class AvroToDynamicRecordGenerator
     }
 
     private RowData convertToRowData(GenericRecord record, Schema icebergSchema) {
+        org.apache.avro.Schema avroSchema = record.getSchema();
         List<Types.NestedField> fields = icebergSchema.columns();
         GenericRowData row = new GenericRowData(fields.size());
         for (int i = 0; i < fields.size(); i++) {
             Types.NestedField field = fields.get(i);
-            Object value = record.get(field.name());
-            row.setField(i, convertValue(value, field.type()));
+            org.apache.avro.Schema.Field avroField = avroSchema.getField(field.name());
+            org.apache.avro.Schema fieldSchema = avroField != null ? avroField.schema() : null;
+            row.setField(i, convertValue(record.get(field.name()), field.type(), fieldSchema));
         }
         return row;
     }
 
-    private Object convertValue(Object value, Type type) {
+    /** Unwrap a nullable Avro union (e.g. ["null","long"]) to its non-null branch. */
+    private static org.apache.avro.Schema unwrapNullable(org.apache.avro.Schema schema) {
+        if (schema != null && schema.getType() == org.apache.avro.Schema.Type.UNION) {
+            for (org.apache.avro.Schema sub : schema.getTypes()) {
+                if (sub.getType() != org.apache.avro.Schema.Type.NULL) {
+                    return sub;
+                }
+            }
+        }
+        return schema;
+    }
+
+    private Object convertValue(Object value, Type type, org.apache.avro.Schema avroSchema) {
         if (value == null) return null;
+        org.apache.avro.Schema resolved = unwrapNullable(avroSchema);
         switch (type.typeId()) {
             case STRING:
                 return StringData.fromString(value.toString());
@@ -204,11 +225,17 @@ public class AvroToDynamicRecordGenerator
                 if (value instanceof LocalDate) return (int) ((LocalDate) value).toEpochDay();
                 return Integer.parseInt(value.toString());
             case TIMESTAMP:
-                if (value instanceof Long) {
-                    long micros = (Long) value;
-                    return TimestampData.fromEpochMillis(micros / 1000L, (int) (micros % 1000) * 1000);
-                }
                 if (value instanceof Instant) return TimestampData.fromInstant((Instant) value);
+                if (value instanceof Long) {
+                    long raw = (Long) value;
+                    org.apache.avro.LogicalType lt = resolved != null ? resolved.getLogicalType() : null;
+                    if (lt instanceof org.apache.avro.LogicalTypes.TimestampMillis) {
+                        return TimestampData.fromEpochMillis(raw);
+                    }
+                    // Default to micros (timestamp-micros); handles negative values correctly.
+                    return TimestampData.fromEpochMillis(
+                            Math.floorDiv(raw, 1000L), (int) Math.floorMod(raw, 1000L) * 1000);
+                }
                 return TimestampData.fromEpochMillis(Long.parseLong(value.toString()));
             case DECIMAL:
                 Types.DecimalType decType = (Types.DecimalType) type;
@@ -238,7 +265,9 @@ public class AvroToDynamicRecordGenerator
                 GenericRowData nestedRow = new GenericRowData(st.fields().size());
                 for (int i = 0; i < st.fields().size(); i++) {
                     Types.NestedField f = st.fields().get(i);
-                    nestedRow.setField(i, convertValue(nested.get(f.name()), f.type()));
+                    org.apache.avro.Schema.Field af = resolved != null ? resolved.getField(f.name()) : null;
+                    nestedRow.setField(i, convertValue(
+                            nested.get(f.name()), f.type(), af != null ? af.schema() : null));
                 }
                 return nestedRow;
             }

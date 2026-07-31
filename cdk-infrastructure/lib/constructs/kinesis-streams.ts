@@ -4,6 +4,7 @@ import { Construct } from 'constructs';
 
 export interface KinesisStreamsProps {
   appType: string;
+  nameSuffix?: string;
   needsSourceStream: boolean;
   needsSinkStream: boolean;
 }
@@ -17,7 +18,7 @@ export class KinesisStreams extends Construct {
 
     if (props.needsSourceStream) {
       this.sourceStream = new kinesis.Stream(this, 'EventStream', {
-        streamName: `iceberg-events-${props.appType}`,
+        streamName: `iceberg-events-${props.appType}${props.nameSuffix ?? ''}`,
         shardCount: 2,
         retentionPeriod: cdk.Duration.hours(24),
         streamMode: kinesis.StreamMode.PROVISIONED,
@@ -29,7 +30,7 @@ export class KinesisStreams extends Construct {
 
     if (props.needsSinkStream) {
       this.sinkStream = new kinesis.Stream(this, 'SinkStream', {
-        streamName: `iceberg-output-${props.appType}`,
+        streamName: `iceberg-output-${props.appType}${props.nameSuffix ?? ''}`,
         shardCount: 2,
         retentionPeriod: cdk.Duration.hours(24),
         streamMode: kinesis.StreamMode.PROVISIONED,

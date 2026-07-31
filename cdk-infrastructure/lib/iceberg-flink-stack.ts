@@ -9,7 +9,8 @@ import { MaintenanceResources } from './constructs/maintenance-resources';
 import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
-  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid';
+  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid' | 'variant';
+  nameSuffix?: string;
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';
   // Source-app overrides: when set, source apps (iceberg-source, iceberg-source-sql,
@@ -78,6 +79,14 @@ const APP_CONFIG = {
     needsSourceStream: true,
     needsSinkStream: true,
   },
+  variant: {
+    modulePath: '../variant-sample',
+    jarName: 'variant-sample-1.0-SNAPSHOT.jar',
+    mainClass: 'com.aws.samples.iceberg.variant.VariantSinkJob',
+    description: 'Stream JSON into an Iceberg V3 variant column via the Flink Variant type',
+    needsSourceStream: true,
+    needsSinkStream: false,
+  },
 };
 
 export class IcebergFlinkStack extends cdk.Stack {
@@ -85,6 +94,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     super(scope, id, props);
 
     const { appType, enableMaintenance, catalogType = 'glue' } = props;
+    const nameSuffix = props.nameSuffix ? `-${props.nameSuffix}` : '';
 
     if (catalogType === 's3tables' && enableMaintenance) {
       throw new Error('S3 Tables handles maintenance automatically. Do not enable maintenance when using S3 Tables catalog.');
@@ -92,11 +102,12 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     const config = APP_CONFIG[appType];
     const databaseName = `iceberg_${appType.replace(/-/g, '_')}`;
-    const cdkBootstrapQualifier = this.node.tryGetContext('cdkBootstrapQualifier') || 'hnb659fds';
+    const cdkBootstrapQualifier = this.node.tryGetContext('@aws-cdk/core:bootstrapQualifier') || this.node.tryGetContext('cdkBootstrapQualifier') || 'hnb659fds';
 
     // --- Kinesis Streams ---
     const streams = new KinesisStreams(this, 'Streams', {
       appType,
+      nameSuffix,
       needsSourceStream: config.needsSourceStream,
       needsSinkStream: config.needsSinkStream,
     });
@@ -132,7 +143,7 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     // --- CloudWatch Logs ---
     const logGroup = new logs.LogGroup(this, 'FlinkLogGroup', {
-      logGroupName: `/aws/kinesisanalytics/iceberg-flink-${appType}`,
+      logGroupName: `/aws/kinesisanalytics/iceberg-flink-${appType}${nameSuffix}`,
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -164,26 +175,10 @@ export class IcebergFlinkStack extends cdk.Stack {
       schemaRegistryName: schemaRegistry?.name,
     });
 
-    // --- Flink JAR Asset ---
+    // --- Flink JAR Asset (pre-built locally with mvn package) ---
+    const jarPath = require('path').resolve(__dirname, '..', config.modulePath, 'target', config.jarName);
     const flinkJarAsset = new s3assets.Asset(this, 'FlinkJarAsset', {
-      path: '..',
-      exclude: ['cdk-infrastructure', 'cdk.out', '.git', '.idea', '.kiro', 'target', 'node_modules'],
-      bundling: {
-        image: cdk.DockerImage.fromRegistry('maven:3.9-eclipse-temurin-17'),
-        command: [
-          'bash', '-c',
-          [
-            'mkdir -p /tmp/.m2',
-            'cp -r /asset-input/* /tmp/',
-            'cd /tmp',
-            `mvn clean package -DskipTests -pl ${config.modulePath.replace('../', '')} -am -Dmaven.repo.local=/tmp/.m2 -q`,
-            'mkdir -p /asset-output',
-            `cp /tmp/${config.modulePath.replace('../', '')}/target/${config.jarName} /asset-output/app.jar`,
-          ].join(' && '),
-        ],
-        user: 'root',
-        outputType: cdk.BundlingOutput.SINGLE_FILE,
-      },
+      path: jarPath,
     });
 
     // --- Runtime Properties ---
@@ -204,7 +199,7 @@ export class IcebergFlinkStack extends cdk.Stack {
 
     // --- Flink Application ---
     const flinkApp = new kinesisanalytics.CfnApplication(this, 'FlinkApplication', {
-      applicationName: `iceberg-flink-${appType}${enableMaintenance ? '-maintenance' : ''}`,
+      applicationName: `iceberg-flink-${appType}${nameSuffix}${enableMaintenance ? '-maintenance' : ''}`,
       runtimeEnvironment: 'FLINK-2_2',
       serviceExecutionRole: flinkIam.role.roleArn,
       applicationConfiguration: {
@@ -378,7 +373,7 @@ export class IcebergFlinkStack extends cdk.Stack {
       // write.mode can be overridden via context (default 'upsert')
       // Set to 'append' to produce data readable by iceberg-source streaming mode
       const writeMode = this.node.tryGetContext('writeMode') || 'upsert';
-      const tableFormatVersion = this.node.tryGetContext('tableFormatVersion') || '2';
+      const tableFormatVersion = this.node.tryGetContext('tableFormatVersion') || '3';
       const props = {
         ...baseProps,
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
@@ -404,10 +399,16 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'glue.database': `iceberg_${appType.replace(/-/g, '_')}`,
-        'table.prefix': 'sql_',
+        // Maintenance writes V2-sink tables under a separate prefix; faster checkpoints
+        // make the commit-count rewrite trigger fire sooner for validation.
+        'table.prefix': enableMaintenance ? 'sqlm_' : 'sql_',
+        'enable.maintenance': enableMaintenance.toString(),
         'write.mode': 'append',
         'primary.key.columns': 'event_id,event_date,region',
       };
+      if (enableMaintenance) {
+        sqlProps['checkpoint.interval.ms'] = '20000';
+      }
       if (catalogType === 'glue' && resources.warehousePath) {
         sqlProps['s3.warehouse.path'] = resources.warehousePath;
       }
@@ -443,6 +444,13 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.region': resources.region,
         'schema.registry.name': `iceberg-${appType}`,
         'partition.candidates': 'event_date,region',
+      };
+    } else if (appType === 'variant') {
+      return {
+        ...baseProps,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.region': resources.region,
+        'iceberg.table': 'events_variant',
       };
     } else {
       // dynamic

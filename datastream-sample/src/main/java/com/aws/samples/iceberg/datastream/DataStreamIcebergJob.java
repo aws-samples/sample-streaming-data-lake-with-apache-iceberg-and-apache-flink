@@ -82,7 +82,7 @@ public final class DataStreamIcebergJob {
     private static final String TABLE_FORMAT_VERSION = "table.format.version";
 
     // Write-side tuning defaults.
-    private static final String DEFAULT_TABLE_FORMAT_VERSION = "2";
+    private static final String DEFAULT_TABLE_FORMAT_VERSION = "3";
     private static final String DEFAULT_WRITE_MODE = "upsert";
     private static final String DEFAULT_PK_COLUMNS = "event_id,event_date,region";
     private static final String DEFAULT_DATABASE = "iceberg_samples";
@@ -306,6 +306,7 @@ public final class DataStreamIcebergJob {
                 .tableLoader(tableLoader)
                 .set("write.format.default", "parquet")
                 .set("write.target-file-size-bytes", Long.toString(DEFAULT_TARGET_FILE_SIZE))
+                .uidSuffix("orders-datastream")
                 .setSnapshotProperty("flink.job-id", "datastream-iceberg-job");
 
         if (isUpsert) {
@@ -336,7 +337,11 @@ public final class DataStreamIcebergJob {
         if ("s3tables".equalsIgnoreCase(catalogType)) {
             LOG.info("S3 Tables catalog — maintenance handled by the service");
         } else if (enableMaintenance) {
-            setupTableMaintenance(env, tableLoader, createJdbcLockFactory(config));
+            // No RDS URL → null lock factory → Coordinator Lock (Iceberg PR #15151). JDBC opt-in.
+            String jdbcUrl = config.get(RDS_JDBC_URL);
+            TriggerLockFactory lockFactory =
+                    (jdbcUrl == null || jdbcUrl.isEmpty()) ? null : createJdbcLockFactory(config);
+            setupTableMaintenance(env, tableLoader, lockFactory);
         } else {
             LOG.info("Maintenance disabled");
         }
@@ -354,7 +359,10 @@ public final class DataStreamIcebergJob {
         LOG.info("Configuring table maintenance topology");
 
         try {
-            TableMaintenance.forTable(env, tableLoader, lockFactory)
+            TableMaintenance.Builder builder = (lockFactory == null)
+                    ? TableMaintenance.forTable(env, tableLoader)               // Coordinator Lock (no RDS/ZK)
+                    : TableMaintenance.forTable(env, tableLoader, lockFactory); // external JDBC/ZK lock
+            builder
                     .uidSuffix("datastream-maintenance")
                     .rateLimit(Duration.ofMinutes(10))
                     .lockCheckDelay(Duration.ofSeconds(30))
