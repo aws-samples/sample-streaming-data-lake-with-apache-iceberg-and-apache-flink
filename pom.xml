@@ -11,7 +11,7 @@
     <packaging>pom</packaging>
 
     <name>Iceberg Flink Samples for AWS Managed Flink</name>
-    <description>Comprehensive samples demonstrating Apache Iceberg 1.10 with Apache Flink 2.2.0 for AWS Managed Flink</description>
+    <description>Samples demonstrating Apache Iceberg 1.11 with Apache Flink 2.3 for Amazon Managed Service for Apache Flink</description>
 
     <modules>
         <module>shared-common</module>
@@ -30,7 +30,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
-        <flink.version>2.2.0</flink.version>
+        <flink.version>2.3.0</flink.version>
         <flink.connector.suffix>2.0</flink.connector.suffix>
         <iceberg.version>1.11.0</iceberg.version>
         <iceberg.flink.suffix>2.1</iceberg.flink.suffix>
@@ -113,12 +113,12 @@
             <dependency>
                 <groupId>org.apache.flink</groupId>
                 <artifactId>flink-connector-aws-kinesis-streams</artifactId>
-                <version>6.0.0-${flink.connector.suffix}</version>
+                <version>6.0.1-${flink.connector.suffix}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.flink</groupId>
                 <artifactId>flink-sql-connector-aws-kinesis-streams</artifactId>
-                <version>6.0.0-${flink.connector.suffix}</version>
+                <version>6.0.1-${flink.connector.suffix}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.flink</groupId>

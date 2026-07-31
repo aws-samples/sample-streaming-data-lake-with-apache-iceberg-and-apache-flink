@@ -200,7 +200,7 @@ export class IcebergFlinkStack extends cdk.Stack {
     // --- Flink Application ---
     const flinkApp = new kinesisanalytics.CfnApplication(this, 'FlinkApplication', {
       applicationName: `iceberg-flink-${appType}${nameSuffix}${enableMaintenance ? '-maintenance' : ''}`,
-      runtimeEnvironment: 'FLINK-2_2',
+      runtimeEnvironment: 'FLINK-2_3',
       serviceExecutionRole: flinkIam.role.roleArn,
       applicationConfiguration: {
         applicationCodeConfiguration: {
