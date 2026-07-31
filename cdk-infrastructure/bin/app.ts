@@ -63,26 +63,6 @@ if (enableNag) {
       reason: 'Kinesis server-side encryption uses AWS managed key for simplicity in samples',
     },
     {
-      id: 'AwsSolutions-RDS3',
-      reason: 'RDS multi-AZ is not required for sample applications - enable in production',
-    },
-    {
-      id: 'AwsSolutions-SMG4',
-      reason: 'The maintenance-lock DB credential is demo-scoped; rotation requires a rotation Lambda that adds cost/complexity to the sample - enable in production',
-    },
-    {
-      id: 'AwsSolutions-RDS10',
-      reason: 'RDS deletion protection is disabled for easy cleanup of sample resources',
-    },
-    {
-      id: 'AwsSolutions-RDS11',
-      reason: 'Default RDS port is acceptable for sample applications in private subnets',
-    },
-    {
-      id: 'AwsSolutions-VPC7',
-      reason: 'VPC flow logs are optional for sample applications - enable in production',
-    },
-    {
       id: 'AwsSolutions-L1',
       reason: 'Lambda runtime version is managed by CDK custom resource provider',
     },

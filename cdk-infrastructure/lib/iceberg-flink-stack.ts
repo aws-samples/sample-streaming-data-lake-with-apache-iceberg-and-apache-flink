@@ -5,7 +5,6 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import { KinesisStreams } from './constructs/kinesis-streams';
 import { CatalogResources } from './constructs/catalog-resources';
-import { MaintenanceResources } from './constructs/maintenance-resources';
 import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
@@ -135,11 +134,9 @@ export class IcebergFlinkStack extends cdk.Stack {
       skipCatalogCreation: hasSourceOverride,
     });
 
-    // --- Maintenance Resources (VPC + RDS, datastream only) ---
-    let maintenance: MaintenanceResources | undefined;
-    if (appType === 'datastream' && enableMaintenance) {
-      maintenance = new MaintenanceResources(this, 'Maintenance', {});
-    }
+    // Maintenance uses Iceberg's in-job coordinator lock (no external lock needed
+    // since 1.11). A JDBC/ZooKeeper lock is only required when maintenance runs in a
+    // SEPARATE job from the writer — see the datastream-sample README for that setup.
 
     // --- CloudWatch Logs ---
     const logGroup = new logs.LogGroup(this, 'FlinkLogGroup', {
@@ -170,8 +167,6 @@ export class IcebergFlinkStack extends cdk.Stack {
       sourceTableBucketArn: props.sourceTableBucketArn,
       sourceDatabase: props.sourceDatabase,
       enableMaintenance: appType === 'datastream' && enableMaintenance,
-      vpc: maintenance?.vpc,
-      dbSecret: maintenance?.dbSecret,
       schemaRegistryName: schemaRegistry?.name,
     });
 
@@ -188,8 +183,6 @@ export class IcebergFlinkStack extends cdk.Stack {
       kinesisSinkStreamName: streams.sinkStream?.streamName,
       warehousePath: catalog.warehouseBucket ? `s3://${catalog.warehouseBucket.bucketName}/warehouse` : '',
       region: this.region,
-      dbEndpoint: maintenance?.database.dbInstanceEndpointAddress,
-      dbSecretArn: maintenance?.dbSecret.secretArn,
       s3TableBucketArn: catalog.s3TableBucketArn,
       sourceDatabase: props.sourceDatabase,
       sourceTable: props.sourceTable,
@@ -238,12 +231,6 @@ export class IcebergFlinkStack extends cdk.Stack {
           },
         },
         applicationSnapshotConfiguration: { snapshotsEnabled: true },
-        vpcConfigurations: maintenance
-          ? [{
-              securityGroupIds: [maintenance.flinkSecurityGroup.securityGroupId],
-              subnetIds: maintenance.vpc.privateSubnets.map((s) => s.subnetId),
-            }]
-          : undefined,
       },
       applicationDescription: config.description,
       applicationMode: 'STREAMING',
@@ -319,16 +306,6 @@ export class IcebergFlinkStack extends cdk.Stack {
         description: 'Glue Schema Registry name for Avro schemas',
       });
     }
-    if (maintenance) {
-      new cdk.CfnOutput(this, 'DatabaseEndpoint', {
-        value: maintenance.database.dbInstanceEndpointAddress,
-        description: 'RDS PostgreSQL endpoint for maintenance locks',
-      });
-      new cdk.CfnOutput(this, 'DatabaseSecretArn', {
-        value: maintenance.dbSecret.secretArn,
-        description: 'Secrets Manager ARN for database credentials',
-      });
-    }
   }
 
   private buildRuntimeProperties(
@@ -341,8 +318,6 @@ export class IcebergFlinkStack extends cdk.Stack {
       kinesisSinkStreamName?: string;
       warehousePath: string;
       region: string;
-      dbEndpoint?: string;
-      dbSecretArn?: string;
       s3TableBucketArn?: string;
       sourceDatabase?: string;
       sourceTable?: string;
@@ -384,14 +359,9 @@ export class IcebergFlinkStack extends cdk.Stack {
         'primary.key.columns': 'event_id,event_date,region',
         'table.format.version': tableFormatVersion,
       };
-      if (enableMaintenance && resources.dbEndpoint && resources.dbSecretArn) {
-        return {
-          ...props,
-          'rds.jdbc.url': `jdbc:postgresql://${resources.dbEndpoint}:5432/iceberg_locks`,
-          'rds.user': 'flink',
-          'rds.password': `{{resolve:secretsmanager:${resources.dbSecretArn}:SecretString:password}}`,
-        };
-      }
+      // Maintenance uses the in-job coordinator lock; no JDBC/RDS properties needed.
+      // To use an external JDBC lock (maintenance in a separate job), set
+      // rds.jdbc.url / rds.user / rds.password manually in the MSF console.
       return props;
     } else if (appType === 'sql') {
       const sqlProps: { [key: string]: string } = {

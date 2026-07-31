@@ -2,8 +2,6 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kinesis from 'aws-cdk-lib/aws-kinesis';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Construct } from 'constructs';
 
 export interface FlinkIamProps {
@@ -18,10 +16,8 @@ export interface FlinkIamProps {
   cdkBootstrapQualifier: string;
   account: string;
   region: string;
-  // Maintenance-related
+  // Maintenance-related (in-job coordinator lock; no VPC/RDS resources needed)
   enableMaintenance: boolean;
-  vpc?: ec2.IVpc;
-  dbSecret?: secretsmanager.ISecret;
   // Source-app overrides (grant read access to external Iceberg source)
   sourceWarehouse?: string;        // S3 warehouse path (e.g., s3://bucket/warehouse)
   sourceTableBucketArn?: string;   // S3 Table Bucket ARN
@@ -203,18 +199,5 @@ export class FlinkIam extends Construct {
       resources: [`arn:aws:kinesisanalytics:${props.region}:${props.account}:application/iceberg-flink-${props.appType}*`],
     }));
 
-    // VPC + RDS permissions for maintenance
-    if (props.enableMaintenance && props.vpc && props.dbSecret) {
-      this.role.addToPolicy(new iam.PolicyStatement({
-        actions: [
-          'ec2:DescribeVpcs', 'ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups',
-          'ec2:DescribeDhcpOptions', 'ec2:DescribeNetworkInterfaces',
-          'ec2:CreateNetworkInterface', 'ec2:CreateNetworkInterfacePermission',
-          'ec2:DeleteNetworkInterface',
-        ],
-        resources: ['*'],
-      }));
-      props.dbSecret.grantRead(this.role);
-    }
   }
 }
