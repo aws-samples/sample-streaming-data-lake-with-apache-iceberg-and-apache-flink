@@ -85,8 +85,8 @@ export class FlinkIam extends Construct {
 
     // External source warehouse (for source apps pointing at existing tables)
     if (props.catalogType === 'glue' && props.sourceWarehouse) {
-      // Parse bucket name from s3://bucket/path
-      const match = props.sourceWarehouse.match(/^s3:\/\/([^/]+)/);
+      // Parse bucket name from "s3://bucket/path" or a bare "bucket" / "bucket/path"
+      const match = props.sourceWarehouse.match(/^(?:s3:\/\/)?([^/]+)/);
       if (match) {
         const sourceBucketArn = `arn:aws:s3:::${match[1]}`;
         this.role.addToPolicy(new iam.PolicyStatement({
