@@ -80,13 +80,13 @@ cdk deploy -c appType=iceberg-source -c catalogType=s3tables
     - `iceberg-source-sql` - Flink SQL for reading Iceberg tables
     - `hybrid` - Bootstrap from Iceberg, then switch to Kinesis streaming
 
-- `enableMaintenance`: Enable table maintenance (DataStream only)
-  - `true` - Deploys with RDS PostgreSQL for distributed locks
+- `enableMaintenance`: Enable in-job table maintenance (datastream or sql)
+  - `true` - Runs compaction/expire/orphan-cleanup operators in the Flink job (in-job coordinator lock; no extra infrastructure)
   - `false` - Deploys without maintenance (default)
 
 - `catalogType`: Choose the Iceberg catalog implementation
   - `glue` - AWS Glue Data Catalog (default)
-  - `s3tables` - Amazon S3 Tables (automatic maintenance, no RDS needed)
+  - `s3tables` - Amazon S3 Tables (automatic maintenance)
 
 - `enableNag`: Enable CDK Nag security checks
   - `true` - Run AWS Solutions security checks (default)
@@ -95,7 +95,7 @@ cdk deploy -c appType=iceberg-source -c catalogType=s3tables
 ## What Gets Deployed
 
 ### All Deployments
-- AWS Managed Flink application (Flink 2.2)
+- AWS Managed Flink application (Flink 2.3)
 - CloudWatch Log Group
 - IAM roles and policies
 
@@ -115,11 +115,8 @@ cdk deploy -c appType=iceberg-source -c catalogType=s3tables
 - S3 bucket for Iceberg warehouse (Glue catalog only)
 - Glue Database or S3 Tables namespace
 
-### With Maintenance Enabled (DataStream + Glue only)
-- RDS PostgreSQL instance for lock coordination
-- VPC with private subnets
-- Security groups
-- Secrets Manager for database credentials
+### With Maintenance Enabled (datastream or sql + Glue)
+- No additional resources — maintenance runs as operators inside the Flink application, coordinated by Iceberg's in-job coordinator lock
 
 ## Architecture
 
@@ -127,7 +124,7 @@ cdk deploy -c appType=iceberg-source -c catalogType=s3tables
 ```
 Kinesis Stream → Flink Application → Iceberg Tables (S3 + Glue/S3Tables)
                         ↓
-                  RDS PostgreSQL (maintenance locks, optional)
+                  in-job maintenance operators (optional)
 ```
 
 ### Source Applications
@@ -182,7 +179,6 @@ cdk deploy -c appType=datastream -c enableNag=false
 ## Cost Optimization
 
 - Flink: ~$0.11/hour per KPU (2 KPUs minimum)
-- RDS t3.micro: ~$0.017/hour (only if maintenance enabled)
 - Kinesis: $0.015/hour per shard + data charges
 - S3: Storage and request charges
 - S3 Tables: Storage and request charges (includes automatic maintenance)

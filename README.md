@@ -1,6 +1,6 @@
 # Streaming to Apache Iceberg with Apache Flink on AWS
 
-Production-ready samples that showcase Apache Iceberg 1.11.0 on Apache Flink 2.2 running on AWS Managed Service for Apache Flink. The samples cover seven patterns — DataStream and SQL sinks, a dynamic sink driven by JSON inference, a dynamic sink driven by AWS Glue Schema Registry (Avro), and three variants for reading Iceberg tables (DataStream, SQL, and hybrid batch-then-stream).
+Production-ready samples that showcase Apache Iceberg 1.11.0 on Apache Flink 2.3 running on AWS Managed Service for Apache Flink. The samples cover seven patterns — DataStream and SQL sinks, a dynamic sink driven by JSON inference, a dynamic sink driven by AWS Glue Schema Registry (Avro), and three variants for reading Iceberg tables (DataStream, SQL, and hybrid batch-then-stream).
 
 Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is deployable via a single parameterized CDK stack, and shares a small `runtime` toolbox that keeps each job's `main()` focused on its own pipeline.
 
@@ -18,7 +18,7 @@ Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is 
 
 | Sample | API | Pattern | Write path | Notes |
 |---|---|---|---|---|
-| `datastream-sample` | DataStream | Single table, upsert + in-job maintenance | `IcebergSink` (SinkV2) | Optional compaction/snapshot expiration coordinated via RDS PostgreSQL JDBC lock |
+| `datastream-sample` | DataStream | Single table, upsert + in-job maintenance | `IcebergSink` (SinkV2) | Optional compaction/snapshot expiration coordinated by the in-job coordinator lock (no external database) |
 | `flink-sql-sample` | Table / SQL | Multi-table routing from one Kinesis stream | `StatementSet` + Iceberg SQL connector | Declarative DDL; good for SQL-first teams |
 | `dynamic-sink-sample` | DataStream | Multi-table routing from one Kinesis stream (JSON) | `DynamicIcebergSink` | Schema inferred from JSON at runtime; routes by a configurable field |
 | `dynamic-sink-avro-sample` | DataStream | Multi-table routing driven by Avro schemas in AWS Glue Schema Registry | `DynamicIcebergSink` | Producers register schemas in GSR; job resolves schema by UUID and evolves Iceberg tables automatically |
@@ -50,11 +50,11 @@ All write-path samples use Iceberg format version 3 by default. With Apache Iceb
                                    │  │  S3 Table Bucket (automatic maintenance) │    │
                                    │  └──────────────────────────────────────────┘    │
                                    │                                                  │
-                                   │  Optional: DataStream + maintenance              │
-                                   │  ┌───────────────────┐    ┌──────────────────┐  │
-                                   │  │  RDS PostgreSQL   │◀───│  Maintenance     │  │
-                                   │  │  (JDBC lock)      │    │  coordinator     │  │
-                                   │  └───────────────────┘    └──────────────────┘  │
+                                   │  Optional: in-job maintenance (datastream/sql)   │
+                                   │  ┌──────────────────────────────────────────┐    │
+                                   │  │  ExpireSnapshots / RewriteDataFiles /    │    │
+                                   │  │  DeleteOrphanFiles (coordinator lock)    │    │
+                                   │  └──────────────────────────────────────────┘    │
                                    └──────────────────────────────────────────────────┘
 ```
 
@@ -87,10 +87,9 @@ streaming-data-lake-with-apache-iceberg-and-apache-flink/
 ├── cdk-infrastructure/                         # Single parameterized CDK stack
 │   └── lib/
 │       ├── iceberg-flink-stack.ts              # Main stack
-│       └── constructs/                         # KinesisStreams, CatalogResources, MaintenanceResources, FlinkIam
-├── docker-compose.yml                          # Local Postgres for JDBC lock testing
-├── .run/                                       # IntelliJ run configurations
-└── pom.xml                                     # Parent POM (Flink 2.2, Iceberg 1.11.0)
+│       └── constructs/                         # KinesisStreams, CatalogResources, FlinkIam
+├── docker-compose.yml                          # Local Postgres (optional external JDBC lock testing)
+└── pom.xml                                     # Parent POM (Flink 2.3, Iceberg 1.11.0)
 ```
 
 Every sample `main()` follows the same shape:
@@ -212,7 +211,8 @@ All deployments go through one stack, `IcebergFlinkStack`, parameterized by CDK 
 | Goal | Command |
 |---|---|
 | DataStream sink to Glue, no maintenance | `npx cdk deploy -c appType=datastream` |
-| DataStream sink to Glue, with in-job maintenance (JDBC lock) | `npx cdk deploy -c appType=datastream -c enableMaintenance=true` |
+| DataStream sink to Glue, with in-job maintenance | `npx cdk deploy -c appType=datastream -c enableMaintenance=true` |
+| Flink SQL to Glue, with in-job maintenance | `npx cdk deploy -c appType=sql -c enableMaintenance=true` |
 | DataStream sink to S3 Tables (managed maintenance) | `npx cdk deploy -c appType=datastream -c catalogType=s3tables` |
 | Flink SQL multi-table routing | `npx cdk deploy -c appType=sql` |
 | Dynamic sink (JSON), Glue | `npx cdk deploy -c appType=dynamic` |
@@ -226,7 +226,7 @@ Additional context flags:
 
 | Flag | Applies to | Purpose |
 |---|---|---|
-| `-c enableMaintenance=true` | `datastream` + `glue` | Provisions RDS and runs `ExpireSnapshots` / `RewriteDataFiles` / `DeleteOrphanFiles` inside the Flink job, coordinated by a JDBC lock |
+| `-c enableMaintenance=true` | `datastream` or `sql` + `glue` | Runs `ExpireSnapshots` / `RewriteDataFiles` / `DeleteOrphanFiles` inside the Flink job, coordinated by Iceberg's in-job coordinator lock — no extra infrastructure. An external JDBC/ZooKeeper lock is only needed when maintenance runs in a separate job from the writer (set `rds.jdbc.url`/`rds.user`/`rds.password` runtime properties manually for that) |
 | `-c catalogType=s3tables` | any write-path sample | Uses S3 Tables instead of Glue Catalog |
 | `-c writeMode=upsert\|append` | `datastream` | Sink mode (default `upsert`) |
 | `-c tableFormatVersion=2\|3` | `datastream` | Override the table format version at creation time (default `3` — see "Delete files and format versions") |
@@ -306,7 +306,7 @@ Verify your read engine before creating v3 tables that downstream consumers quer
 |---|---|
 | **Amazon S3 Tables** | Automatic — the service handles compaction and snapshot management. `-c enableMaintenance=true` is rejected when `catalogType=s3tables`. |
 | **AWS Glue Data Catalog — auto-compaction enabled on the database** | Automatic compaction by Glue. No Flink code required. |
-| **AWS Glue Data Catalog — in-job** | `-c appType=datastream -c enableMaintenance=true`. Provisions an RDS PostgreSQL for a JDBC lock and adds `ExpireSnapshots` + `RewriteDataFiles` + `DeleteOrphanFiles` operators to the Flink job. |
+| **AWS Glue Data Catalog — in-job** | `-c appType=datastream -c enableMaintenance=true` (or `-c appType=sql -c enableMaintenance=true`). Adds `ExpireSnapshots` + `RewriteDataFiles` + `DeleteOrphanFiles` operators to the Flink job, coordinated by Iceberg's in-job coordinator lock. No external database. An external JDBC/ZooKeeper lock is only needed when maintenance runs in a **separate** job from the writer; the datastream job supports that via the `rds.jdbc.url` / `rds.user` / `rds.password` runtime properties. |
 
 The in-job schedule in `datastream-sample`:
 
@@ -379,12 +379,11 @@ Rough per-day cost in `us-east-1` while running:
 
 | Deployment | Approx cost/day |
 |---|---|
-| SQL / dynamic / source-only (no VPC, no RDS) | **~$6** |
-| DataStream without maintenance | **~$6** |
-| DataStream with in-job maintenance (adds RDS t3.micro + NAT Gateway) | **~$8** |
+| SQL / dynamic / source-only | **~$6** |
+| DataStream with or without in-job maintenance | **~$6** |
 | S3 Tables variants | **~$6** plus S3 Tables storage |
 
-Drivers are Managed Flink (~$5.28/day for 2 KPUs), Kinesis shards (~$0.72/day for 2 shards), NAT Gateway when maintenance is enabled (~$1.08/day), and S3 storage (variable). Stop or destroy the stack when you're not actively testing.
+Drivers are Managed Flink (~$5.28/day for 2 KPUs), Kinesis shards (~$0.72/day for 2 shards), and S3 storage (variable). In-job maintenance adds no infrastructure cost — it runs as operators inside the same Flink application. Stop or destroy the stack when you're not actively testing.
 
 ---
 

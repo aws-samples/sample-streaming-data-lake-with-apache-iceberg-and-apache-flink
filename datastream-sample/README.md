@@ -11,7 +11,7 @@ This module demonstrates using Apache Flink's DataStream API with Apache Iceberg
 
 ## Requirements
 
-- Apache Flink 2.2.0
+- Apache Flink 2.3.0
 - Apache Iceberg 1.11.0
 - AWS Kinesis Data Streams
 - AWS Glue Data Catalog
