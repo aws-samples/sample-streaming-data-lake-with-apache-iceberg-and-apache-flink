@@ -22,6 +22,7 @@ Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is 
 | `flink-sql-sample` | Table / SQL | Multi-table routing from one Kinesis stream | `StatementSet` + Iceberg SQL connector | Declarative DDL; good for SQL-first teams |
 | `dynamic-sink-sample` | DataStream | Multi-table routing from one Kinesis stream (JSON) | `DynamicIcebergSink` | Schema inferred from JSON at runtime; routes by a configurable field |
 | `dynamic-sink-avro-sample` | DataStream | Multi-table routing driven by Avro schemas in AWS Glue Schema Registry | `DynamicIcebergSink` | Producers register schemas in GSR; job resolves schema by UUID and evolves Iceberg tables automatically |
+| `sql-dynamic-sink-sample` | Table / SQL | Multi-table routing from plain SQL with a Java router | `DynamicIcebergSink` via `use-dynamic-iceberg-sink` | One `INSERT INTO` fans out per `event_type`; router class set with `dynamic-record-generator-impl` (Iceberg 1.11+). In-job maintenance is not available on this path |
 | `iceberg-source-datastream-sample` | DataStream | Read an Iceberg table, write rows to Kinesis | `IcebergSource` (FLIP-27) | Streaming or batch; append-only source tables only for streaming |
 | `iceberg-source-sql-sample` | Table / SQL | Read Iceberg with SQL hints, write rows to Kinesis | Iceberg SQL connector | Supports branches, tags, time travel via SQL hints |
 | `hybrid-source-sample` | DataStream | Bootstrap from Iceberg, switch to Kinesis streaming | `HybridSource` | Backfill-then-stream for migrations |
@@ -170,6 +171,7 @@ The Web UI port differs per sample so you can run several at once:
 | `flink-sql-sample` | 8084 |
 | `iceberg-source-datastream-sample` | 8085 |
 | `hybrid-source-sample` | 8086 |
+| `sql-dynamic-sink-sample` | 8087 |
 
 (`iceberg-source-sql-sample` sets its runtime mode before environment creation and doesn't open the Web UI automatically; pass `-Drest.port=…` as a JVM flag if you need it locally.)
 
@@ -218,6 +220,7 @@ All deployments go through one stack, `IcebergFlinkStack`, parameterized by CDK 
 | Dynamic sink (JSON), Glue | `npx cdk deploy -c appType=dynamic` |
 | Dynamic sink (Avro + GSR), Glue | `npx cdk deploy -c appType=dynamic-avro` |
 | Dynamic sink (Avro + GSR), S3 Tables | `npx cdk deploy -c appType=dynamic-avro -c catalogType=s3tables` |
+| SQL dynamic sink (Java router) | `npx cdk deploy -c appType=sql-dynamic` |
 | Iceberg source → Kinesis (DataStream) | `npx cdk deploy -c appType=iceberg-source` |
 | Iceberg source → Kinesis (SQL) | `npx cdk deploy -c appType=iceberg-source-sql` |
 | Hybrid source: Iceberg bootstrap + Kinesis streaming | `npx cdk deploy -c appType=hybrid` |

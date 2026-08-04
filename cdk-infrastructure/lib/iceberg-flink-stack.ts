@@ -8,7 +8,7 @@ import { CatalogResources } from './constructs/catalog-resources';
 import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
-  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid' | 'variant';
+  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid' | 'variant' | 'sql-dynamic';
   nameSuffix?: string;
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';
@@ -83,6 +83,14 @@ const APP_CONFIG = {
     jarName: 'variant-sample-1.0-SNAPSHOT.jar',
     mainClass: 'com.aws.samples.iceberg.variant.VariantSinkJob',
     description: 'Stream JSON into an Iceberg V3 variant column via the Flink Variant type',
+    needsSourceStream: true,
+    needsSinkStream: false,
+  },
+  'sql-dynamic': {
+    modulePath: '../sql-dynamic-sink-sample',
+    jarName: 'sql-dynamic-sink-sample-1.0-SNAPSHOT.jar',
+    mainClass: 'com.aws.samples.iceberg.sqldynamic.SqlDynamicSinkJob',
+    description: 'Flink SQL dynamic Iceberg sink with a Java routing generator',
     needsSourceStream: true,
     needsSinkStream: false,
   },
@@ -421,6 +429,15 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'iceberg.table': 'events_variant',
+      };
+    } else if (appType === 'sql-dynamic') {
+      // NOTE: enable.maintenance is passed through for observability only — the dynamic
+      // sink path does not build the maintenance topology (see sql-dynamic-sink-sample).
+      return {
+        ...baseProps,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.region': resources.region,
+        'enable.maintenance': enableMaintenance.toString(),
       };
     } else {
       // dynamic

@@ -24,6 +24,7 @@
         <module>iceberg-source-sql-sample</module>
         <module>hybrid-source-sample</module>
         <module>variant-sample</module>
+        <module>sql-dynamic-sink-sample</module>
     </modules>
 
     <properties>
