@@ -232,7 +232,7 @@ Additional context flags:
 | `-c enableMaintenance=true` | `datastream` or `sql` + `glue` | Runs `ExpireSnapshots` / `RewriteDataFiles` / `DeleteOrphanFiles` inside the Flink job, coordinated by Iceberg's in-job coordinator lock — no extra infrastructure. An external JDBC/ZooKeeper lock is only needed when maintenance runs in a separate job from the writer (set `rds.jdbc.url`/`rds.user`/`rds.password` runtime properties manually for that) |
 | `-c catalogType=s3tables` | any write-path sample | Uses S3 Tables instead of Glue Catalog |
 | `-c writeMode=upsert\|append` | `datastream` | Sink mode (default `upsert`) |
-| `-c tableFormatVersion=2\|3` | `datastream` | Override the table format version at creation time (default `3` — see "Delete files and format versions") |
+| `-c tableFormatVersion=2\|3` | `datastream`, `dynamic`, `dynamic-avro` | Override the table format version at creation time (default `3` — see "Delete files and format versions"). Use `2` when the tables must be readable by engines without v3 support, such as Amazon Athena |
 | `-c sourceDatabase=…`, `-c sourceTable=…`, `-c sourceWarehouse=…`, `-c sourceTableBucketArn=…` | source apps | Point source apps at an existing Iceberg table rather than creating a new empty one |
 | `-c stackSuffix=…` | any | Suffix applied to stack-scoped resource names so multiple variants can coexist |
 | `-c cdkBootstrapQualifier=…` | any | Override the CDK bootstrap qualifier if you've used a non-default `cdk bootstrap` |

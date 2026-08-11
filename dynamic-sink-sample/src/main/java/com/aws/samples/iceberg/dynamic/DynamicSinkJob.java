@@ -50,6 +50,7 @@ public final class DynamicSinkJob {
     private static final String KEY_PARTITION_CANDIDATES = "partition.candidates";
     private static final String KEY_WRITE_MODE = "write.mode";
     private static final String KEY_PRIMARY_KEY_COLUMNS = "primary.key.columns";
+    private static final String KEY_TABLE_FORMAT_VERSION = "table.format.version";
 
     // Defaults
     private static final String DEFAULT_DATABASE = "iceberg_samples";
@@ -64,7 +65,9 @@ public final class DynamicSinkJob {
     private static final String TARGET_FILE_SIZE_BYTES = "134217728";
     // Iceberg 1.11.0+: V3 tables get equality deletes + Delete Vectors (DVs) for streaming
     // upserts. DVs replace positional delete files for known-position deletes.
-    private static final String FORMAT_VERSION = "3";
+    // Overridable via the table.format.version runtime property (e.g. set 2 for
+    // engines that cannot read v3 yet, such as Amazon Athena).
+    private static final String DEFAULT_FORMAT_VERSION = "3";
     private static final int LOCAL_WEB_UI_PORT = 8082;
 
     private static final String UID_KINESIS_SOURCE = "kinesis-source-dynamic";
@@ -144,11 +147,12 @@ public final class DynamicSinkJob {
         boolean isUpsert = "upsert".equalsIgnoreCase(writeMode);
         List<String> primaryKeyColumns = Arrays.asList(
                 config.getOrDefault(KEY_PRIMARY_KEY_COLUMNS, DEFAULT_PK_COLUMNS).split(","));
+        String formatVersion = config.getOrDefault(KEY_TABLE_FORMAT_VERSION, DEFAULT_FORMAT_VERSION);
 
         LOG.info("Dynamic Iceberg Sink: db={}, routingField={}, tableSuffix={}, "
-                        + "partitionCandidates={}, writeMode={}{}",
+                        + "partitionCandidates={}, writeMode={}{}, formatVersion={}",
                 database, routingField, tableSuffix, partitionCandidates, writeMode,
-                isUpsert ? " (PKs: " + primaryKeyColumns + ")" : "");
+                isUpsert ? " (PKs: " + primaryKeyColumns + ")" : "", formatVersion);
 
         SchemaAgnosticRoutingGenerator generator = new SchemaAgnosticRoutingGenerator(
                 database, routingField, null, tableSuffix, partitionCandidates);
@@ -160,7 +164,7 @@ public final class DynamicSinkJob {
                 .cacheMaxSize(cacheMaxSize)
                 .cacheRefreshMs(cacheRefreshMs)
                 .set("write.format.default", "parquet")
-                .set("format-version", FORMAT_VERSION)
+                .set("format-version", formatVersion)
                 .set("write.target-file-size-bytes", TARGET_FILE_SIZE_BYTES)
                 .set("write.parquet.compression-codec", "snappy");
 
