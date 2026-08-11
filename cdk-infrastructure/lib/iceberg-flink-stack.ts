@@ -416,12 +416,14 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.sink.stream.arn': resources.kinesisSinkStreamArn!,
       };
     } else if (appType === 'dynamic-avro') {
+      const tableFormatVersion = this.node.tryGetContext('tableFormatVersion') || '3';
       return {
         ...baseProps,
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'schema.registry.name': `iceberg-${appType}`,
         'partition.candidates': 'event_date,region',
+        'table.format.version': tableFormatVersion,
       };
     } else if (appType === 'variant') {
       return {
@@ -441,12 +443,14 @@ export class IcebergFlinkStack extends cdk.Stack {
       };
     } else {
       // dynamic
+      const tableFormatVersion = this.node.tryGetContext('tableFormatVersion') || '3';
       return {
         ...baseProps,
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'write.mode': 'append',
         'primary.key.columns': 'event_id,event_date,region',
+        'table.format.version': tableFormatVersion,
       };
     }
   }

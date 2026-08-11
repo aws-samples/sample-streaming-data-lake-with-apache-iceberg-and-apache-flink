@@ -49,6 +49,7 @@ public final class DynamicAvroSinkJob {
     private static final String KEY_CACHE_MAX_SIZE = "cache.max.size";
     private static final String KEY_CACHE_REFRESH_MS = "cache.refresh.ms";
     private static final String KEY_CHECKPOINT_INTERVAL = "checkpoint.interval.ms";
+    private static final String KEY_TABLE_FORMAT_VERSION = "table.format.version";
 
     private static final String DEFAULT_AWS_REGION = "us-east-1";
     private static final String DEFAULT_PARTITION_CANDIDATES = "event_date,region,date";
@@ -56,7 +57,9 @@ public final class DynamicAvroSinkJob {
     private static final String DEFAULT_CACHE_REFRESH_MS = "60000";
     // Iceberg 1.11.0+: V3 tables get equality deletes + Delete Vectors (DVs).
     // DVs replace positional delete files for known-position deletes.
-    private static final String FORMAT_VERSION = "3";
+    // Overridable via the table.format.version runtime property (e.g. set 2 for
+    // engines that cannot read v3 yet, such as Amazon Athena).
+    private static final String DEFAULT_FORMAT_VERSION = "3";
     private static final String TARGET_FILE_SIZE_BYTES = "134217728";
     private static final int LOCAL_WEB_UI_PORT = 8083;
 
@@ -79,11 +82,13 @@ public final class DynamicAvroSinkJob {
                 config.getOrDefault(KEY_PARTITION_CANDIDATES, DEFAULT_PARTITION_CANDIDATES).split(","));
         int cacheMaxSize = Integer.parseInt(config.getOrDefault(KEY_CACHE_MAX_SIZE, DEFAULT_CACHE_MAX_SIZE));
         long cacheRefreshMs = Long.parseLong(config.getOrDefault(KEY_CACHE_REFRESH_MS, DEFAULT_CACHE_REFRESH_MS));
+        String formatVersion = config.getOrDefault(KEY_TABLE_FORMAT_VERSION, DEFAULT_FORMAT_VERSION);
 
         LOG.info("Starting Dynamic Avro Sink Job");
         LOG.info("  Kinesis stream: {}", streamArn);
         LOG.info("  GSR registry: {}", registryName.isEmpty() ? "default-registry" : registryName);
         LOG.info("  Iceberg database: {}", database);
+        LOG.info("  Table format version: {}", formatVersion);
 
         if (FlinkEnvironments.isLocal(env)) {
             long interval = Long.parseLong(config.getOrDefault(
@@ -116,7 +121,7 @@ public final class DynamicAvroSinkJob {
                 .cacheMaxSize(cacheMaxSize)
                 .cacheRefreshMs(cacheRefreshMs)
                 .set("write.format.default", "parquet")
-                .set("format-version", FORMAT_VERSION)
+                .set("format-version", formatVersion)
                 .set("write.target-file-size-bytes", TARGET_FILE_SIZE_BYTES)
                 .set("write.parquet.compression-codec", "snappy")
                 .append();
