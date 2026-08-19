@@ -27,7 +27,7 @@ Every sample works against either AWS Glue Data Catalog or Amazon S3 Tables, is 
 | `iceberg-source-sql-sample` | Table / SQL | Read Iceberg with SQL hints, write rows to Kinesis | Iceberg SQL connector | Supports branches, tags, time travel via SQL hints |
 | `hybrid-source-sample` | DataStream | Bootstrap from Iceberg, switch to Kinesis streaming | `HybridSource` | Backfill-then-stream for migrations |
 
-All write-path samples use Iceberg format version 3 by default. With Apache Iceberg 1.11.0 the Flink sink writes deletion vectors natively for v3 tables. See the "Delete files and format versions" section below for reader-compatibility notes (Amazon Athena does not yet support v3).
+All write-path samples use Iceberg format version 3 by default. With Apache Iceberg 1.11.0 the Flink sink writes deletion vectors natively for v3 tables. See the "Delete files and format versions" section below for reader-compatibility notes (Amazon Athena requires v2 tables).
 
 ---
 
@@ -251,7 +251,7 @@ Then feed it data with the data generator (see above), pointing at the Kinesis s
 
 ## Querying the tables
 
-Athena works out of the box with Glue Catalog and supports Iceberg metadata tables:
+Athena works with Glue Catalog and supports Iceberg metadata tables. Athena requires tables created with `-c tableFormatVersion=2`; for v3 tables, use a v3-aware engine (see [reader compatibility](#reader-compatibility)):
 
 ```sql
 -- Snapshot history
@@ -280,7 +280,7 @@ Starting with **Apache Iceberg 1.11.0**, the Flink sink writes deletion vectors 
 
 Validated on Amazon Managed Service for Apache Flink (Flink 2.2 runtime): a v3 table created by the DataStream sample writes deletion vectors (`POS_DEL` entries with `file_format=PUFFIN` and a `content_offset`) alongside equality delete files, confirmed via the snapshot summary (`added-dvs`) and manifest inspection.
 
-Override the table format version with `-c tableFormatVersion=2` if you need v2 (for example, to support a reader that does not yet handle v3).
+Override the table format version with `-c tableFormatVersion=2` if you need v2 (for example, when a downstream reader lacks v3 support).
 
 ### Reader compatibility
 
