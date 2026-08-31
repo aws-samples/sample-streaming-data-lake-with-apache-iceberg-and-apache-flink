@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.aws.samples</groupId>
+        <artifactId>iceberg-flink-managed-samples</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>pyflink-dynamic-sink-sample</artifactId>
+    <packaging>jar</packaging>
+
+    <name>PyFlink Dynamic Sink Sample</name>
+    <description>PyFlink driving Iceberg's DynamicIcebergSink through one compiled Java routing generator (JSON only, no Glue Schema Registry)</description>
+
+    <dependencies>
+        <!-- Shared common module: reuses the shaded HadoopUtils and IcebergConfig
+             (Glue CatalogLoader construction) that the Python job mirrors via Py4J. -->
+        <dependency>
+            <groupId>com.aws.samples</groupId>
+            <artifactId>shared-common</artifactId>
+            <version>${project.version}</version>
+            <exclusions>
+                <!-- Bundles an older iceberg-core whose classes would win the shade merge
+                     over iceberg-flink-runtime 1.11 (NoSuchMethodError: ThreadPools).
+                     This sample does not target S3 Tables. -->
+                <exclusion>
+                    <groupId>software.amazon.s3tables</groupId>
+                    <artifactId>s3-tables-catalog-for-iceberg</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- Flink Core - provided by the PyFlink runtime (local) and the MSF
+             Flink runtime, so never bundled. -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-java</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-clients</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-runtime</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-runtime-web</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Kinesis connector: the Python job wraps the Java KinesisStreamsSource
+             (SimpleStringSchema) via Py4J. BUNDLED so MSF has it on the classpath. -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-aws-kinesis-streams</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-base</artifactId>
+        </dependency>
+
+        <!-- AWS Managed Flink runtime - provided by the service. -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-kinesisanalytics-runtime</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Iceberg: bundles the dynamic sink package
+             (org.apache.iceberg.flink.sink.dynamic.*) and Glue catalog support. -->
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-flink-runtime-${iceberg.flink.suffix}</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-aws-bundle</artifactId>
+        </dependency>
+
+        <!-- S3 FileSystem support for the s3:// warehouse. -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-s3-fs-hadoop</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <!-- Jackson for parsing input JSON in the generator. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- Logging -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-reload4j</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.reload4j</groupId>
+            <artifactId>reload4j</artifactId>
+        </dependency>
+
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- Stable jar name so the CDK bundling step and the run options can
+             reference it without a version suffix. -->
+        <finalName>pyflink-dynamic-sink-sample</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <!-- No ManifestResourceTransformer / mainClass: PyFlink
+                                 loads this jar as a classpath library, not as a job jar. -->
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <relocations>
+                                <!-- Keep the parent's relocations verbatim: declaring
+                                     <relocations> here overrides (not appends to) the
+                                     inherited list. -->
+                                <relocation>
+                                    <pattern>org.apache.hadoop.conf</pattern>
+                                    <shadedPattern>shaded.org.apache.hadoop.conf</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>org.apache.flink.runtime.util.HadoopUtils</pattern>
+                                    <shadedPattern>shaded.org.apache.flink.runtime.util.HadoopUtils</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>software.amazon.awssdk</pattern>
+                                    <shadedPattern>shaded.software.amazon.awssdk</shadedPattern>
+                                </relocation>
+                                <!-- MSF loads this jar on the PYTHON driver's parent
+                                     classpath (kinesis.analytics.flink.run.options
+                                     jarfile), where Flink's own commons-cli is already
+                                     loaded: an unrelocated copy causes
+                                     "LinkageError: loader constraint violation:
+                                     org.apache.commons.cli.Options". -->
+                                <relocation>
+                                    <pattern>org.apache.commons.cli</pattern>
+                                    <shadedPattern>shaded.org.apache.commons.cli</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

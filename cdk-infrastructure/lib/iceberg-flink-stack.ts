@@ -8,7 +8,7 @@ import { CatalogResources } from './constructs/catalog-resources';
 import { FlinkIam } from './constructs/flink-iam';
 
 export interface IcebergFlinkStackProps extends cdk.StackProps {
-  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid' | 'variant' | 'sql-dynamic';
+  appType: 'datastream' | 'sql' | 'dynamic' | 'dynamic-avro' | 'iceberg-source' | 'iceberg-source-sql' | 'hybrid' | 'variant' | 'sql-dynamic' | 'pyflink-dynamic';
   nameSuffix?: string;
   enableMaintenance: boolean;
   catalogType?: 'glue' | 's3tables';
@@ -94,6 +94,16 @@ const APP_CONFIG = {
     needsSourceStream: true,
     needsSinkStream: false,
   },
+  'pyflink-dynamic': {
+    modulePath: '../pyflink-dynamic-sink-sample',
+    jarName: 'pyflink-dynamic-sink-sample.jar',
+    mainClass: '', // PyFlink app: entry point is python=main.py, not a Java main class
+    description: 'PyFlink driving the Iceberg DynamicIcebergSink via one Java routing generator (JSON only)',
+    needsSourceStream: true,
+    needsSinkStream: false,
+    runtime: 'python' as const,
+    pyMainFile: 'main.py',
+  },
 };
 
 export class IcebergFlinkStack extends cdk.Stack {
@@ -178,11 +188,36 @@ export class IcebergFlinkStack extends cdk.Stack {
       schemaRegistryName: schemaRegistry?.name,
     });
 
-    // --- Flink JAR Asset (pre-built locally with mvn package) ---
-    const jarPath = require('path').resolve(__dirname, '..', config.modulePath, 'target', config.jarName);
-    const flinkJarAsset = new s3assets.Asset(this, 'FlinkJarAsset', {
-      path: jarPath,
-    });
+    // --- Flink Application Code Asset (pre-built locally with mvn package) ---
+    const isPython = (config as { runtime?: string }).runtime === 'python';
+    const pathMod = require('path');
+    const jarPath = pathMod.resolve(__dirname, '..', config.modulePath, 'target', config.jarName);
+
+    let flinkCodeAsset: s3assets.Asset;
+    // The jar name inside the MSF application zip; referenced by the jarfile run option.
+    const pyJarInZip = config.jarName;
+
+    if (isPython) {
+      // MSF Python packaging contract: the application zip must contain the
+      // Python entry point (main.py) alongside the module fat jar. We stage both
+      // into a temp directory and let s3assets.Asset zip that directory.
+      const fs = require('fs');
+      const os = require('os');
+      const pyMainFile = (config as { pyMainFile?: string }).pyMainFile || 'main.py';
+      const pyMainSrc = pathMod.resolve(__dirname, '..', config.modulePath, 'python', pyMainFile);
+      const stagingDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'pyflink-msf-'));
+      fs.copyFileSync(pyMainSrc, pathMod.join(stagingDir, pyMainFile));
+      fs.copyFileSync(jarPath, pathMod.join(stagingDir, pyJarInZip));
+      flinkCodeAsset = new s3assets.Asset(this, 'FlinkCodeAsset', {
+        path: stagingDir,
+        // CDK zips a directory asset by default -> a single .zip artifact on S3.
+      });
+    } else {
+      flinkCodeAsset = new s3assets.Asset(this, 'FlinkJarAsset', {
+        path: jarPath,
+      });
+    }
+    const flinkJarAsset = flinkCodeAsset;
 
     // --- Runtime Properties ---
     const runtimeProperties = this.buildRuntimeProperties(appType, enableMaintenance, catalogType, {
@@ -214,10 +249,21 @@ export class IcebergFlinkStack extends cdk.Stack {
           codeContentType: 'ZIPFILE',
         },
         environmentProperties: {
-          propertyGroups: [{
-            propertyGroupId: 'FlinkApplicationProperties',
-            propertyMap: runtimeProperties,
-          }],
+          propertyGroups: [
+            {
+              propertyGroupId: 'FlinkApplicationProperties',
+              propertyMap: runtimeProperties,
+            },
+            // MSF Python apps require the run options group naming the Python
+            // entry point and the fat jar (placed on the PyFlink gateway classpath).
+            ...(isPython ? [{
+              propertyGroupId: 'kinesis.analytics.flink.run.options',
+              propertyMap: {
+                python: (config as { pyMainFile?: string }).pyMainFile || 'main.py',
+                jarfile: pyJarInZip,
+              },
+            }] : []),
+          ],
         },
         flinkApplicationConfiguration: {
           monitoringConfiguration: {
@@ -440,6 +486,16 @@ export class IcebergFlinkStack extends cdk.Stack {
         'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
         'kinesis.region': resources.region,
         'enable.maintenance': enableMaintenance.toString(),
+      };
+    } else if (appType === 'pyflink-dynamic') {
+      // JSON-only PyFlink dynamic sink. The Python job reads these keys and the
+      // routing allowlist; there is no Glue Schema Registry involved.
+      return {
+        ...baseProps,
+        'kinesis.stream.arn': resources.kinesisSourceStreamArn!,
+        'kinesis.region': resources.region,
+        'routing.allowlist': 'order,user,click',
+        'routing.table.suffix': '_events',
       };
     } else {
       // dynamic
