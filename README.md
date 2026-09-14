@@ -270,6 +270,23 @@ FROM iceberg_datastream.orders$delete_files;
 
 For S3 Tables, use the `s3tables` catalog in Athena or any DV-aware engine (e.g. Spark on EMR 7.12+).
 
+### Access control when the AWS analytics services integration is enabled
+
+S3 Tables exposes independent access paths, and they are governed differently:
+
+| Access path | Used by | Governed by |
+|---|---|---|
+| S3 Tables APIs and the `S3TablesCatalog` client | The Flink jobs in this repository when `catalog.type=s3tables` | IAM only |
+| S3 Tables Iceberg REST endpoint (`https://s3tables.<region>.amazonaws.com/iceberg`) | Generic Iceberg REST clients with SigV4 (signing name `s3tables`) | IAM only |
+| AWS Glue Data Catalog federation (`s3tablescatalog`) and the Glue Iceberg REST endpoint | Athena, Amazon Redshift, Amazon EMR, and third-party engines such as Snowflake | AWS Lake Formation |
+
+Enabling the [AWS analytics services integration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrating-aws.html) on your table buckets registers them with AWS Lake Formation, and access through the federated path then requires both Lake Formation grants and a client that supports Lake Formation credential vending. The `S3TablesCatalog` client authenticates with the caller's IAM credentials only and never requests vended credentials. On table buckets whose data access is managed through Lake Formation, writes through it can fail with an S3 `Access Denied` (403) on data files, with no `lakeformation:GetDataAccess` call appearing in AWS CloudTrail.
+
+If you hit this, two configurations work:
+
+- Point the job at the Glue Iceberg REST endpoint (`https://glue.<region>.amazonaws.com/iceberg`, SigV4 signing name `glue`, warehouse `<account-id>:s3tablescatalog/<bucket-name>`) and grant the job's IAM role the corresponding Lake Formation permissions. This routes data access through Lake Formation credential vending, the same path Athena and Snowflake use.
+- Use S3 Tables' own Iceberg REST endpoint (`https://s3tables.<region>.amazonaws.com/iceberg`, signing name `s3tables`) with IAM permissions on the table bucket. This path stays IAM-governed and coexists with Lake Formation governance of the federated path on the same bucket.
+
 ---
 
 ## Delete files and format versions
